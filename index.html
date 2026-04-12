@@ -1,0 +1,1290 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>MIR Prep</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+  /* ── CONFIG: paste your Supabase values below ── */
+  /* They are also set in the JS section          */
+
+  /* ── DESIGN SYSTEM ── */
+  :root {
+    --bg:        #0d0f14;
+    --surface:   #161b24;
+    --surface2:  #1e2535;
+    --border:    #2a3347;
+    --accent:    #3b82f6;
+    --accent-glow: rgba(59,130,246,0.25);
+    --green:     #22c55e;
+    --red:       #ef4444;
+    --yellow:    #f59e0b;
+    --text:      #e8eaf0;
+    --muted:     #6b7a99;
+    --radius:    14px;
+    --font-body: 'Georgia', 'Times New Roman', serif;
+    --font-ui:   system-ui, -apple-system, sans-serif;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body {
+    height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-ui);
+    -webkit-font-smoothing: antialiased;
+    overflow-x: hidden;
+  }
+
+  /* ── SCREENS ── */
+  .screen { display: none; min-height: 100vh; padding: 0 0 env(safe-area-inset-bottom); }
+  .screen.active { display: flex; flex-direction: column; }
+
+  /* ── AUTH SCREEN ── */
+  #screen-auth {
+    align-items: center;
+    justify-content: center;
+    padding: 32px 24px;
+    background: radial-gradient(ellipse at 50% 0%, rgba(59,130,246,0.12) 0%, transparent 70%);
+  }
+
+  .auth-logo {
+    font-size: 48px;
+    margin-bottom: 8px;
+    filter: drop-shadow(0 0 20px var(--accent-glow));
+  }
+
+  .auth-title {
+    font-size: 28px;
+    font-weight: 700;
+    letter-spacing: -0.5px;
+    margin-bottom: 4px;
+  }
+
+  .auth-sub {
+    color: var(--muted);
+    font-size: 14px;
+    margin-bottom: 40px;
+  }
+
+  .auth-card {
+    width: 100%;
+    max-width: 380px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    padding: 28px 24px;
+  }
+
+  .auth-tab-row {
+    display: flex;
+    background: var(--surface2);
+    border-radius: 10px;
+    padding: 4px;
+    margin-bottom: 24px;
+  }
+
+  .auth-tab {
+    flex: 1;
+    padding: 8px;
+    text-align: center;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    color: var(--muted);
+    transition: all 0.2s;
+    border: none;
+    background: transparent;
+  }
+
+  .auth-tab.active {
+    background: var(--accent);
+    color: white;
+  }
+
+  .field-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 6px;
+  }
+
+  .field-input {
+    width: 100%;
+    padding: 12px 14px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    color: var(--text);
+    font-size: 16px;
+    margin-bottom: 16px;
+    outline: none;
+    transition: border-color 0.2s;
+    -webkit-appearance: none;
+  }
+
+  .field-input:focus { border-color: var(--accent); }
+
+  .btn-primary {
+    width: 100%;
+    padding: 14px;
+    background: var(--accent);
+    color: white;
+    border: none;
+    border-radius: 12px;
+    font-size: 16px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: opacity 0.2s, transform 0.1s;
+    -webkit-appearance: none;
+  }
+
+  .btn-primary:active { transform: scale(0.98); opacity: 0.9; }
+  .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .auth-error {
+    color: var(--red);
+    font-size: 13px;
+    margin-top: 12px;
+    text-align: center;
+    min-height: 18px;
+  }
+
+  /* ── HOME SCREEN ── */
+  #screen-home { background: var(--bg); }
+
+  .home-header {
+    padding: 56px 20px 20px;
+    background: linear-gradient(to bottom, rgba(59,130,246,0.08), transparent);
+  }
+
+  .home-greeting {
+    font-size: 13px;
+    color: var(--muted);
+    margin-bottom: 4px;
+  }
+
+  .home-title {
+    font-size: 26px;
+    font-weight: 700;
+    letter-spacing: -0.3px;
+  }
+
+  .home-user-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 4px;
+  }
+
+  .home-signout {
+    font-size: 13px;
+    color: var(--muted);
+    cursor: pointer;
+    padding: 4px 8px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--muted);
+  }
+
+  .section-title {
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--muted);
+    padding: 20px 20px 10px;
+  }
+
+  .exam-list { padding: 0 16px 32px; display: flex; flex-direction: column; gap: 10px; }
+
+  .exam-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 18px 16px;
+    cursor: pointer;
+    transition: transform 0.15s, border-color 0.15s;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .exam-card:active { transform: scale(0.98); border-color: var(--accent); }
+
+  .exam-card-name {
+    font-size: 17px;
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+
+  .exam-card-meta {
+    font-size: 13px;
+    color: var(--muted);
+  }
+
+  .exam-card-score {
+    text-align: right;
+    flex-shrink: 0;
+  }
+
+  .score-badge {
+    font-size: 20px;
+    font-weight: 700;
+    line-height: 1;
+  }
+
+  .score-badge.good { color: var(--green); }
+  .score-badge.mid  { color: var(--yellow); }
+  .score-badge.bad  { color: var(--red); }
+  .score-badge.none { color: var(--muted); font-size: 13px; font-weight: 400; }
+
+  .score-label {
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 2px;
+  }
+
+  .exam-chevron {
+    color: var(--muted);
+    font-size: 18px;
+    margin-left: 4px;
+  }
+
+  .empty-state {
+    padding: 40px 20px;
+    text-align: center;
+    color: var(--muted);
+    font-size: 15px;
+  }
+
+  /* ── EXAM SCREEN ── */
+  #screen-exam { background: var(--bg); }
+
+  .exam-topbar {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    background: var(--bg);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 16px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .btn-back {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    font-size: 13px;
+    padding: 6px 12px;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+
+  .exam-progress-wrap {
+    flex: 1;
+  }
+
+  .exam-progress-label {
+    font-size: 12px;
+    color: var(--muted);
+    margin-bottom: 4px;
+  }
+
+  .exam-progress-bar {
+    height: 4px;
+    background: var(--surface2);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+
+  .exam-progress-fill {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 2px;
+    transition: width 0.4s ease;
+  }
+
+  .exam-score-chip {
+    font-size: 12px;
+    padding: 4px 10px;
+    border-radius: 20px;
+    background: var(--surface2);
+    white-space: nowrap;
+  }
+
+  /* Question area */
+  .question-scroll {
+    flex: 1;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    padding: 20px 16px 120px;
+  }
+
+  .question-number-tag {
+    display: inline-block;
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--accent);
+    background: var(--accent-glow);
+    padding: 3px 10px;
+    border-radius: 20px;
+    margin-bottom: 14px;
+    letter-spacing: 0.3px;
+  }
+
+  .question-text {
+    font-family: var(--font-body);
+    font-size: 16px;
+    line-height: 1.7;
+    color: var(--text);
+    margin-bottom: 20px;
+  }
+
+  .imagen-ref {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: rgba(59,130,246,0.15);
+    color: var(--accent);
+    padding: 2px 8px;
+    border-radius: 6px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    border: 1px solid rgba(59,130,246,0.3);
+    font-family: var(--font-ui);
+    transition: background 0.15s;
+    white-space: nowrap;
+  }
+
+  .imagen-ref:hover { background: rgba(59,130,246,0.25); }
+
+  .options-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-bottom: 24px;
+  }
+
+  .option-btn {
+    width: 100%;
+    text-align: left;
+    padding: 14px 16px;
+    background: var(--surface);
+    border: 1.5px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text);
+    font-size: 15px;
+    line-height: 1.5;
+    cursor: pointer;
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+    transition: border-color 0.15s, background 0.15s;
+    font-family: var(--font-body);
+    -webkit-appearance: none;
+  }
+
+  .option-btn:active:not([disabled]) { transform: scale(0.99); }
+
+  .option-num {
+    flex-shrink: 0;
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    background: var(--surface2);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    font-weight: 700;
+    font-family: var(--font-ui);
+    color: var(--muted);
+    margin-top: 1px;
+  }
+
+  .option-btn.correct {
+    border-color: var(--green);
+    background: rgba(34,197,94,0.08);
+  }
+
+  .option-btn.correct .option-num {
+    background: var(--green);
+    color: white;
+  }
+
+  .option-btn.wrong {
+    border-color: var(--red);
+    background: rgba(239,68,68,0.08);
+  }
+
+  .option-btn.wrong .option-num {
+    background: var(--red);
+    color: white;
+  }
+
+  .option-btn.dimmed { opacity: 0.45; }
+
+  .option-btn[disabled] { cursor: not-allowed; }
+
+  /* Feedback strip */
+  .feedback-strip {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    padding: 16px 16px calc(16px + env(safe-area-inset-bottom));
+    transform: translateY(100%);
+    transition: transform 0.35s cubic-bezier(0.34,1.56,0.64,1);
+    z-index: 20;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .feedback-strip.show { transform: translateY(0); }
+
+  .feedback-strip.correct { background: linear-gradient(to top, rgba(34,197,94,0.18), rgba(34,197,94,0.05)); border-top: 1px solid rgba(34,197,94,0.3); }
+  .feedback-strip.wrong   { background: linear-gradient(to top, rgba(239,68,68,0.18), rgba(239,68,68,0.05)); border-top: 1px solid rgba(239,68,68,0.3); }
+  .feedback-strip.annulled { background: linear-gradient(to top, rgba(107,122,153,0.18), rgba(107,122,153,0.05)); border-top: 1px solid rgba(107,122,153,0.3); }
+
+  .feedback-icon { font-size: 28px; flex-shrink: 0; }
+  .feedback-text-wrap { flex: 1; }
+  .feedback-title { font-size: 16px; font-weight: 700; margin-bottom: 2px; }
+  .feedback-sub   { font-size: 13px; color: var(--muted); }
+
+  .feedback-strip.correct .feedback-title { color: var(--green); }
+  .feedback-strip.wrong   .feedback-title { color: var(--red); }
+
+  /* Annulled / skipped notice */
+  .annulled-notice {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 14px;
+    margin-bottom: 16px;
+    font-size: 13px;
+    color: var(--muted);
+  }
+
+  /* ── IMAGE OVERLAY ── */
+  .image-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    background: rgba(0,0,0,0.92);
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+  }
+
+  .image-overlay.open { display: flex; }
+
+  .overlay-header {
+    width: 100%;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 16px;
+  }
+
+  .overlay-label {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+  }
+
+  .overlay-close {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-size: 18px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+
+  .overlay-img-wrap {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    width: 100%;
+    touch-action: pinch-zoom;
+  }
+
+  .overlay-img {
+    max-width: 100%;
+    max-height: calc(100vh - 140px);
+    object-fit: contain;
+    border-radius: 8px;
+    user-select: none;
+  }
+
+  .overlay-tabs {
+    display: flex;
+    gap: 8px;
+    margin-top: 16px;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+
+  .overlay-tab {
+    padding: 6px 14px;
+    border-radius: 20px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--muted);
+    transition: all 0.15s;
+  }
+
+  .overlay-tab.active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: white;
+  }
+
+  /* ── RESULTS SCREEN ── */
+  #screen-results {
+    align-items: center;
+    justify-content: center;
+    padding: 32px 20px;
+    text-align: center;
+  }
+
+  .results-emoji { font-size: 64px; margin-bottom: 16px; }
+  .results-title { font-size: 24px; font-weight: 700; margin-bottom: 8px; }
+  .results-sub { color: var(--muted); font-size: 15px; margin-bottom: 32px; }
+
+  .results-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 10px;
+    width: 100%;
+    max-width: 400px;
+    margin-bottom: 32px;
+  }
+
+  .results-cell {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px 10px;
+  }
+
+  .results-cell-num {
+    font-size: 26px;
+    font-weight: 700;
+    line-height: 1;
+    margin-bottom: 4px;
+  }
+
+  .results-cell-num.green { color: var(--green); }
+  .results-cell-num.red   { color: var(--red); }
+  .results-cell-num.muted { color: var(--muted); }
+
+  .results-cell-label { font-size: 11px; color: var(--muted); }
+
+  .score-ring-wrap {
+    position: relative;
+    width: 140px;
+    height: 140px;
+    margin: 0 auto 24px;
+  }
+
+  .score-ring-svg { transform: rotate(-90deg); }
+
+  .score-ring-bg  { fill: none; stroke: var(--surface2); stroke-width: 10; }
+  .score-ring-fill { fill: none; stroke-width: 10; stroke-linecap: round; transition: stroke-dashoffset 1s ease; }
+
+  .score-ring-text {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .score-ring-pct { font-size: 28px; font-weight: 700; }
+  .score-ring-lbl { font-size: 11px; color: var(--muted); }
+
+  /* ── LOADING ── */
+  .loading-overlay {
+    position: fixed; inset: 0; z-index: 200;
+    background: var(--bg);
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 16px;
+  }
+
+  .spinner {
+    width: 40px; height: 40px;
+    border: 3px solid var(--surface2);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+  }
+
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .loading-text { color: var(--muted); font-size: 14px; }
+
+  /* ── TOAST ── */
+  .toast {
+    position: fixed; bottom: 90px; left: 50%; transform: translateX(-50%) translateY(20px);
+    background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    padding: 10px 18px; font-size: 14px; color: var(--text);
+    opacity: 0; transition: all 0.3s; pointer-events: none; z-index: 300;
+    white-space: nowrap;
+  }
+
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+  /* ── UTILITIES ── */
+  .mt8 { margin-top: 8px; }
+  .mt16 { margin-top: 16px; }
+
+  @media (min-width: 640px) {
+    .question-scroll { padding: 28px 24px 140px; }
+    .auth-card { box-shadow: 0 20px 60px rgba(0,0,0,0.4); }
+  }
+</style>
+</head>
+<body>
+
+<!-- ══════════════════ AUTH SCREEN ══════════════════ -->
+<div id="screen-auth" class="screen active">
+  <div class="auth-logo">🩺</div>
+  <div class="auth-title">MIR Prep</div>
+  <div class="auth-sub">Prepara tu examen MIR</div>
+
+  <div class="auth-card">
+    <div class="auth-tab-row">
+      <button class="auth-tab active" onclick="setAuthMode('login')">Iniciar sesión</button>
+      <button class="auth-tab" onclick="setAuthMode('register')">Registrarse</button>
+    </div>
+
+    <div class="field-label">Correo electrónico</div>
+    <input class="field-input" type="email" id="auth-email" placeholder="tu@email.com" autocomplete="email">
+
+    <div class="field-label">Contraseña</div>
+    <input class="field-input" type="password" id="auth-password" placeholder="••••••••" autocomplete="current-password">
+
+    <button class="btn-primary" id="auth-btn" onclick="handleAuth()">Entrar</button>
+    <div class="auth-error" id="auth-error"></div>
+  </div>
+</div>
+
+<!-- ══════════════════ HOME SCREEN ══════════════════ -->
+<div id="screen-home" class="screen">
+  <div class="home-header">
+    <div class="home-user-row">
+      <div>
+        <div class="home-greeting">Bienvenido/a</div>
+        <div class="home-title">Exámenes MIR</div>
+      </div>
+      <button class="home-signout" onclick="signOut()">Salir</button>
+    </div>
+  </div>
+
+  <div class="section-title">Selecciona un examen</div>
+  <div class="exam-list" id="exam-list">
+    <div class="empty-state">Cargando exámenes...</div>
+  </div>
+</div>
+
+<!-- ══════════════════ EXAM SCREEN ══════════════════ -->
+<div id="screen-exam" class="screen">
+  <div class="exam-topbar">
+    <button class="btn-back" onclick="exitExam()">← Salir</button>
+    <div class="exam-progress-wrap">
+      <div class="exam-progress-label" id="progress-label">Pregunta 1 de 210</div>
+      <div class="exam-progress-bar">
+        <div class="exam-progress-fill" id="progress-fill" style="width:0%"></div>
+      </div>
+    </div>
+    <div class="exam-score-chip" id="score-chip">✓ 0 &nbsp;✗ 0</div>
+  </div>
+
+  <div class="question-scroll" id="question-scroll">
+    <div class="question-number-tag" id="q-tag">Pregunta 1</div>
+    <div class="question-text" id="q-text"></div>
+    <div class="options-list" id="options-list"></div>
+  </div>
+
+  <!-- Feedback strip (slides up after answering) -->
+  <div class="feedback-strip" id="feedback-strip">
+    <div class="feedback-icon" id="feedback-icon"></div>
+    <div class="feedback-text-wrap">
+      <div class="feedback-title" id="feedback-title"></div>
+      <div class="feedback-sub"   id="feedback-sub"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════ RESULTS SCREEN ══════════════════ -->
+<div id="screen-results" class="screen">
+  <div class="results-emoji" id="results-emoji">🏆</div>
+  <div class="results-title" id="results-title">¡Examen completado!</div>
+  <div class="results-sub"   id="results-sub"></div>
+
+  <div class="score-ring-wrap">
+    <svg class="score-ring-svg" width="140" height="140" viewBox="0 0 140 140">
+      <circle class="score-ring-bg" cx="70" cy="70" r="60"/>
+      <circle class="score-ring-fill" id="ring-fill" cx="70" cy="70" r="60"
+              stroke-dasharray="377" stroke-dashoffset="377"/>
+    </svg>
+    <div class="score-ring-text">
+      <div class="score-ring-pct" id="ring-pct">0%</div>
+      <div class="score-ring-lbl">aciertos</div>
+    </div>
+  </div>
+
+  <div class="results-grid">
+    <div class="results-cell">
+      <div class="results-cell-num green" id="res-correct">0</div>
+      <div class="results-cell-label">Correctas</div>
+    </div>
+    <div class="results-cell">
+      <div class="results-cell-num red" id="res-wrong">0</div>
+      <div class="results-cell-label">Incorrectas</div>
+    </div>
+    <div class="results-cell">
+      <div class="results-cell-num muted" id="res-annulled">0</div>
+      <div class="results-cell-label">Anuladas</div>
+    </div>
+  </div>
+
+  <button class="btn-primary" style="max-width:320px" onclick="goHome()">Volver al inicio</button>
+</div>
+
+<!-- ══════════════════ IMAGE OVERLAY ══════════════════ -->
+<div class="image-overlay" id="image-overlay">
+  <div class="overlay-header">
+    <div class="overlay-label" id="overlay-label">Imagen</div>
+    <button class="overlay-close" onclick="closeImageOverlay()">✕</button>
+  </div>
+  <div class="overlay-img-wrap">
+    <img class="overlay-img" id="overlay-img" src="" alt="Imagen del examen">
+  </div>
+  <div class="overlay-tabs" id="overlay-tabs"></div>
+</div>
+
+<!-- ══════════════════ LOADING ══════════════════ -->
+<div class="loading-overlay" id="loading-overlay">
+  <div class="spinner"></div>
+  <div class="loading-text" id="loading-text">Cargando...</div>
+</div>
+
+<!-- ══════════════════ TOAST ══════════════════ -->
+<div class="toast" id="toast"></div>
+
+<script>
+// ════════════════════════════════════════════════════
+// ⚙️  CONFIGURATION — paste your Supabase values here
+// ════════════════════════════════════════════════════
+const SUPABASE_URL  = 'https://epbolpgvgdztvtvhanxt.supabase.co';          // e.g. https://xxxx.supabase.co
+const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVwYm9scGd2Z2R6dHZ0dmhhbnh0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU5NjQ3OTgsImV4cCI6MjA5MTU0MDc5OH0.u-Ly4X0KMcEZfGpWz4OP9NnhAEsk-fOz5unkrMoTtfY';     // from Settings > API > anon key
+// ════════════════════════════════════════════════════
+
+const { createClient } = supabase;
+const sb = createClient(SUPABASE_URL, SUPABASE_ANON);
+
+// ── STATE ──────────────────────────────────────────
+let currentUser   = null;
+let currentExam   = null;
+let questions     = [];
+let currentIdx    = 0;
+let attemptId     = null;
+let score         = { correct: 0, wrong: 0, annulled: 0 };
+let feedbackTimer = null;
+let authMode      = 'login';
+let latestAttempts = {};  // { exam_id: {score_pct, total_correct, total_answered} }
+
+// ── INIT ───────────────────────────────────────────
+window.addEventListener('load', async () => {
+  try {
+    const { data: { session } } = await sb.auth.getSession();
+    if (session?.user) {
+      currentUser = session.user;
+      showScreen('home');
+      loadHome();
+    } else {
+      hideLoading();
+    }
+  } catch (e) {
+    hideLoading();
+  }
+});
+
+sb.auth.onAuthStateChange((_event, session) => {
+  if (!session && currentUser) {
+    currentUser = null;
+    showScreen('auth');
+  }
+});
+
+// ── AUTH ───────────────────────────────────────────
+function setAuthMode(mode) {
+  authMode = mode;
+  document.querySelectorAll('.auth-tab').forEach((t, i) => {
+    t.classList.toggle('active', (i === 0) === (mode === 'login'));
+  });
+  document.getElementById('auth-btn').textContent = mode === 'login' ? 'Entrar' : 'Crear cuenta';
+}
+
+async function handleAuth() {
+  const email = document.getElementById('auth-email').value.trim();
+  const pass  = document.getElementById('auth-password').value;
+  const errEl = document.getElementById('auth-error');
+  errEl.textContent = '';
+
+  if (!email || !pass) { errEl.textContent = 'Completa todos los campos'; return; }
+  if (pass.length < 6)  { errEl.textContent = 'La contraseña debe tener al menos 6 caracteres'; return; }
+
+  const btn = document.getElementById('auth-btn');
+  btn.disabled = true;
+  btn.textContent = '...';
+
+  try {
+    let result;
+    if (authMode === 'login') {
+      result = await sb.auth.signInWithPassword({ email, password: pass });
+    } else {
+      result = await sb.auth.signUp({ email, password: pass });
+    }
+
+    if (result.error) { errEl.textContent = result.error.message; return; }
+    currentUser = result.data.user || result.data.session?.user;
+
+    if (authMode === 'register' && !result.data.session) {
+      errEl.style.color = 'var(--green)';
+      errEl.textContent = 'Revisa tu email para confirmar la cuenta.';
+      return;
+    }
+
+    showScreen('home');
+    loadHome();
+  } finally {
+    btn.disabled = false;
+    btn.textContent = authMode === 'login' ? 'Entrar' : 'Crear cuenta';
+  }
+}
+
+async function signOut() {
+  await sb.auth.signOut();
+  showScreen('auth');
+}
+
+// ── HOME ───────────────────────────────────────────
+async function loadHome() {
+  showLoading('Cargando exámenes...');
+  try {
+    // Load exams
+    const { data: exams, error: eErr } = await sb.from('exams').select('*').order('year', { ascending: false });
+    if (eErr) throw eErr;
+
+    // Load user's latest attempts
+    if (currentUser) {
+      const { data: attempts } = await sb
+        .from('latest_attempts')
+        .select('*')
+        .eq('user_id', currentUser.id);
+
+      latestAttempts = {};
+      (attempts || []).forEach(a => { latestAttempts[a.exam_id] = a; });
+    }
+
+    renderExamList(exams || []);
+  } catch (e) {
+    console.error(e);
+    showToast('Error cargando exámenes');
+  } finally {
+    hideLoading();
+  }
+}
+
+function renderExamList(exams) {
+  const list = document.getElementById('exam-list');
+  if (!exams.length) {
+    list.innerHTML = '<div class="empty-state">No hay exámenes disponibles todavía.</div>';
+    return;
+  }
+
+  list.innerHTML = exams.map(exam => {
+    const attempt = latestAttempts[exam.id];
+    let scoreHtml = '<div class="score-badge none">Sin intentos</div>';
+    if (attempt && attempt.is_complete) {
+      const pct = Math.round(attempt.score_pct || 0);
+      const cls = pct >= 70 ? 'good' : pct >= 50 ? 'mid' : 'bad';
+      scoreHtml = `
+        <div class="score-badge ${cls}">${pct}%</div>
+        <div class="score-label">${attempt.total_correct}/${attempt.total_answered}</div>
+      `;
+    }
+
+    return `
+      <div class="exam-card" onclick="startExam('${exam.id}', '${escHtml(exam.name)}', ${exam.total_questions})">
+        <div>
+          <div class="exam-card-name">${escHtml(exam.name)}</div>
+          <div class="exam-card-meta">${exam.total_questions} preguntas</div>
+        </div>
+        <div class="exam-card-score">
+          ${scoreHtml}
+        </div>
+        <span class="exam-chevron">›</span>
+      </div>
+    `;
+  }).join('');
+}
+
+// ── START EXAM ────────────────────────────────────
+async function startExam(examId, examName, totalQ) {
+  showLoading('Cargando preguntas...');
+  try {
+    currentExam = { id: examId, name: examName, totalQ };
+    score = { correct: 0, wrong: 0, annulled: 0 };
+    currentIdx = 0;
+
+    // Load all questions
+    const { data: qs, error } = await sb
+      .from('questions')
+      .select('*')
+      .eq('exam_id', examId)
+      .order('number', { ascending: true });
+
+    if (error) throw error;
+    questions = qs || [];
+
+    if (!questions.length) { showToast('Este examen no tiene preguntas aún.'); return; }
+
+    // Create attempt record
+    const { data: att, error: aErr } = await sb.from('attempts').insert({
+      user_id: currentUser.id,
+      exam_id: examId,
+      total_answered: 0,
+      total_correct: 0,
+      total_incorrect: 0
+    }).select().single();
+
+    if (aErr) throw aErr;
+    attemptId = att.id;
+
+    showScreen('exam');
+    renderQuestion();
+  } catch (e) {
+    console.error(e);
+    showToast('Error cargando el examen');
+  } finally {
+    hideLoading();
+  }
+}
+
+// ── QUESTION RENDERING ────────────────────────────
+function renderQuestion() {
+  if (currentIdx >= questions.length) { finishExam(); return; }
+
+  const q = questions[currentIdx];
+  const total = questions.length;
+  const pct = ((currentIdx) / total) * 100;
+
+  // Progress
+  document.getElementById('progress-label').textContent = `Pregunta ${currentIdx + 1} de ${total}`;
+  document.getElementById('progress-fill').style.width = `${pct}%`;
+  document.getElementById('score-chip').innerHTML = `✓ ${score.correct} &nbsp;✗ ${score.wrong}`;
+  document.getElementById('q-tag').textContent = `Pregunta ${q.number}`;
+
+  // Question text — make image refs tappable
+  const qTextEl = document.getElementById('q-text');
+  qTextEl.innerHTML = formatQuestionText(q.text, q.image_refs, q.image_urls);
+
+  // Scroll to top
+  document.getElementById('question-scroll').scrollTop = 0;
+
+  // Annulled notice
+  const optList = document.getElementById('options-list');
+
+  if (q.is_annulled) {
+    optList.innerHTML = `
+      <div class="annulled-notice">⚠️ Esta pregunta fue <strong>anulada</strong> en el examen oficial. No tiene respuesta correcta.</div>
+    `;
+    setTimeout(() => advanceQuestion(q, null, true), 2500);
+    hideFeedback();
+    return;
+  }
+
+  // Options
+  optList.innerHTML = [1, 2, 3, 4].map(n => {
+    const text = q[`option_${n}`] || '';
+    if (!text) return '';
+    return `
+      <button class="option-btn" id="opt-${n}" onclick="selectOption(${n})">
+        <span class="option-num">${n}</span>
+        <span>${escHtml(text)}</span>
+      </button>
+    `;
+  }).join('');
+
+  hideFeedback();
+}
+
+function formatQuestionText(text, imageRefs, imageUrls) {
+  if (!text) return '';
+  let html = escHtml(text);
+
+  // Replace image references with tappable spans
+  // Handles: (IMAGEN 1), (IMAGEN 5a), (IMÁGENES 5a y 5b)
+  html = html.replace(/\(IMÁGENES?\s+([\w]+(?:\s+y\s+[\w]+)*)\)/gi, (match, refs) => {
+    const refList = refs.split(/\s+y\s+/i).map(r => r.trim().toLowerCase());
+    const labels = refList.map(r => `Imagen ${r.toUpperCase()}`).join(' y ');
+    const refsJson = JSON.stringify(refList).replace(/"/g, '&quot;');
+    const urlsJson = JSON.stringify(imageUrls || {}).replace(/"/g, '&quot;');
+    return `<span class="imagen-ref" onclick='openImageOverlay(${refsJson}, ${urlsJson})'>
+      🔬 ${labels}
+    </span>`;
+  });
+
+  return html;
+}
+
+// ── ANSWER HANDLING ───────────────────────────────
+function selectOption(chosen) {
+  const q = questions[currentIdx];
+  if (!q || q.is_annulled) return;
+
+  const correct = q.correct_option;
+  const isCorrect = chosen === correct;
+
+  // Disable all buttons
+  [1,2,3,4].forEach(n => {
+    const btn = document.getElementById(`opt-${n}`);
+    if (!btn) return;
+    btn.disabled = true;
+    if (n === correct) { btn.classList.add('correct'); }
+    else if (n === chosen && !isCorrect) { btn.classList.add('wrong'); }
+    else { btn.classList.add('dimmed'); }
+  });
+
+  // Update score
+  if (isCorrect) score.correct++; else score.wrong++;
+
+  // Show feedback
+  const strip = document.getElementById('feedback-strip');
+  strip.className = `feedback-strip ${isCorrect ? 'correct' : 'wrong'}`;
+
+  document.getElementById('feedback-icon').textContent  = isCorrect ? '✅' : '❌';
+  document.getElementById('feedback-title').textContent = isCorrect ? '¡Correcto!' : 'Incorrecto';
+  document.getElementById('feedback-sub').textContent   = isCorrect
+    ? 'Muy bien, sigue así'
+    : `La respuesta correcta era la opción ${correct}`;
+
+  requestAnimationFrame(() => strip.classList.add('show'));
+
+  // Save answer async (fire and forget)
+  saveAnswer(q, chosen, isCorrect);
+
+  // Advance after 1.5s
+  clearTimeout(feedbackTimer);
+  feedbackTimer = setTimeout(() => advanceQuestion(q, chosen, false), 1500);
+}
+
+function advanceQuestion(q, chosen, isAnnulled) {
+  if (isAnnulled) score.annulled++;
+  currentIdx++;
+  renderQuestion();
+}
+
+function hideFeedback() {
+  const strip = document.getElementById('feedback-strip');
+  strip.classList.remove('show');
+  strip.className = 'feedback-strip';
+}
+
+// ── IMAGE OVERLAY ─────────────────────────────────
+let overlayRefs = [];
+let overlayUrls = {};
+let activeOverlayRef = null;
+
+function openImageOverlay(refs, urls) {
+  overlayRefs = refs;
+  overlayUrls = urls;
+
+  const overlay = document.getElementById('image-overlay');
+  overlay.classList.add('open');
+
+  // Build tabs if multiple images
+  const tabsEl = document.getElementById('overlay-tabs');
+  if (refs.length > 1) {
+    tabsEl.innerHTML = refs.map(r =>
+      `<button class="overlay-tab" onclick="switchOverlayImage('${r}')">Imagen ${r.toUpperCase()}</button>`
+    ).join('');
+  } else {
+    tabsEl.innerHTML = '';
+  }
+
+  switchOverlayImage(refs[0]);
+}
+
+function switchOverlayImage(ref) {
+  activeOverlayRef = ref;
+  const url = overlayUrls[ref];
+  document.getElementById('overlay-img').src = url || '';
+  document.getElementById('overlay-label').textContent = `Imagen ${ref.toUpperCase()}`;
+
+  // Update active tab
+  document.querySelectorAll('.overlay-tab').forEach(t => {
+    t.classList.toggle('active', t.textContent === `Imagen ${ref.toUpperCase()}`);
+  });
+
+  if (!url) {
+    document.getElementById('overlay-img').alt = 'Imagen no disponible';
+  }
+}
+
+function closeImageOverlay() {
+  document.getElementById('image-overlay').classList.remove('open');
+}
+
+// ── SAVE ANSWER TO SUPABASE ───────────────────────
+async function saveAnswer(q, chosen, isCorrect) {
+  if (!attemptId) return;
+  try {
+    await sb.from('attempt_answers').insert({
+      attempt_id: attemptId,
+      question_id: q.id,
+      question_number: q.number,
+      selected_option: chosen,
+      is_correct: isCorrect
+    });
+  } catch (e) {
+    console.warn('Failed to save answer:', e);
+  }
+}
+
+// ── FINISH EXAM ───────────────────────────────────
+async function finishExam() {
+  const total = questions.length;
+  const answered = score.correct + score.wrong;
+  const pct = answered > 0 ? (score.correct / answered) * 100 : 0;
+
+  // Update attempt record
+  if (attemptId) {
+    try {
+      await sb.from('attempts').update({
+        completed_at: new Date().toISOString(),
+        total_answered: answered,
+        total_correct: score.correct,
+        total_incorrect: score.wrong,
+        total_annulled: score.annulled,
+        score_pct: pct,
+        is_complete: true
+      }).eq('id', attemptId);
+    } catch (e) { console.warn('Failed to update attempt:', e); }
+  }
+
+  // Show results screen
+  showScreen('results');
+
+  document.getElementById('res-correct').textContent  = score.correct;
+  document.getElementById('res-wrong').textContent    = score.wrong;
+  document.getElementById('res-annulled').textContent = score.annulled;
+  document.getElementById('ring-pct').textContent     = `${Math.round(pct)}%`;
+
+  const emoji = pct >= 75 ? '🏆' : pct >= 50 ? '📚' : '💪';
+  document.getElementById('results-emoji').textContent = emoji;
+  document.getElementById('results-title').textContent = pct >= 75 ? '¡Excelente resultado!' : pct >= 50 ? 'Buen intento' : '¡Sigue practicando!';
+  document.getElementById('results-sub').textContent   = `${currentExam?.name || 'Examen'} completado`;
+
+  // Animate ring
+  const ring = document.getElementById('ring-fill');
+  const circumference = 377;
+  const offset = circumference - (pct / 100) * circumference;
+  ring.style.stroke = pct >= 70 ? 'var(--green)' : pct >= 50 ? 'var(--yellow)' : 'var(--red)';
+  setTimeout(() => { ring.style.strokeDashoffset = offset; }, 100);
+}
+
+function goHome() {
+  showScreen('home');
+  loadHome();
+}
+
+function exitExam() {
+  clearTimeout(feedbackTimer);
+  if (currentIdx > 0) {
+    if (!confirm('¿Salir del examen? Se perderá el progreso de esta sesión.')) return;
+  }
+  showScreen('home');
+  loadHome();
+}
+
+// ── SCREEN MANAGEMENT ─────────────────────────────
+function showScreen(name) {
+  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+  document.getElementById(`screen-${name}`).classList.add('active');
+  if (name !== 'auth') hideLoading();
+}
+
+function showLoading(text = 'Cargando...') {
+  document.getElementById('loading-text').textContent = text;
+  document.getElementById('loading-overlay').style.display = 'flex';
+}
+
+function hideLoading() {
+  document.getElementById('loading-overlay').style.display = 'none';
+}
+
+// ── TOAST ─────────────────────────────────────────
+let toastTimer;
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 3000);
+}
+
+// ── UTILS ─────────────────────────────────────────
+function escHtml(str) {
+  if (!str) return '';
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+// Close image overlay on background tap
+document.getElementById('image-overlay').addEventListener('click', function(e) {
+  if (e.target === this) closeImageOverlay();
+});
+
+// Prevent scroll bleed
+document.getElementById('question-scroll').addEventListener('touchmove', e => e.stopPropagation(), { passive: true });
+</script>
+</body>
+</html>
