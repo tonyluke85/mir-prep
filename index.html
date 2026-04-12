@@ -1,0 +1,1439 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0">
+<title>MIR Prep</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2">
+// ── Custom Test ────────────────────────────────────────────────
+let customTestCount = 100;
+let customTestScope = 'all';     // 'all' | 'select'
+let selectedTemas = new Set();
+let allTemas = [];               // [{tema, subject}] from DB
+
+async function openTestModal(count) {
+  customTestCount = count;
+  customTestScope = 'all';
+  selectedTemas.clear();
+  document.getElementById('tema-modal-title').textContent = `Test de ${count} preguntas`;
+  setTemaScope('all');
+
+  // Load temas if not already loaded
+  if (!allTemas.length) {
+    try {
+      const { data } = await sb.from('questions')
+        .select('tema, tema_subject')
+        .not('tema', 'is', null)
+        .neq('tema', '')
+        .order('tema_subject', {ascending:true});
+      const seen = new Set();
+      allTemas = [];
+      (data||[]).forEach(r => {
+        const key = r.tema;
+        if (!seen.has(key)) { seen.add(key); allTemas.push({tema:r.tema, subject:r.tema_subject}); }
+      });
+    } catch(e) { console.error(e); }
+  }
+
+  renderTemaList();
+  document.getElementById('tema-modal-backdrop').classList.add('open');
+}
+
+function renderTemaList() {
+  // Group temas by subject
+  const bySubject = {};
+  allTemas.forEach(t => {
+    const s = t.subject || 'Sin asignatura';
+    if (!bySubject[s]) bySubject[s] = [];
+    bySubject[s].push(t);
+  });
+
+  const el = document.getElementById('tema-list');
+  let html = '';
+  Object.entries(bySubject).sort(([a],[b])=>a.localeCompare(b)).forEach(([subj, temas]) => {
+    html += `<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);padding:8px 2px 4px">${esc(subj)}</div>`;
+    temas.forEach(t => {
+      const sel = selectedTemas.has(t.tema);
+      html += `<div class="tema-item${sel?' selected':''}" onclick="toggleTema('${esc(t.tema).replace(/'/g,"\\'")}')">
+        <div class="tema-check">${sel?'✓':''}</div>
+        <div class="tema-item-name">${esc(t.tema)}</div>
+      </div>`;
+    });
+  });
+  el.innerHTML = html;
+  updateTemaStartBtn();
+}
+
+function toggleTema(tema) {
+  if (selectedTemas.has(tema)) selectedTemas.delete(tema);
+  else selectedTemas.add(tema);
+  renderTemaList();
+}
+
+function setTemaScope(scope) {
+  customTestScope = scope;
+  document.getElementById('scope-all').classList.toggle('active', scope==='all');
+  document.getElementById('scope-select').classList.toggle('active', scope==='select');
+  document.getElementById('tema-list').style.display = scope==='select' ? 'flex' : 'none';
+  updateTemaStartBtn();
+}
+
+function updateTemaStartBtn() {
+  const btn = document.getElementById('tema-modal-start');
+  const ok = customTestScope === 'all' || selectedTemas.size > 0;
+  btn.disabled = !ok;
+  btn.textContent = ok
+    ? `Empezar test (${customTestCount} preguntas)`
+    : 'Selecciona al menos un tema';
+}
+
+function closeTestModal() {
+  document.getElementById('tema-modal-backdrop').classList.remove('open');
+}
+
+// Count modal
+function openCountModal() {
+  customTestCount = 75;
+  document.getElementById('count-val').textContent = 75;
+  document.getElementById('count-modal-backdrop').classList.add('open');
+}
+function closeCountModal() {
+  document.getElementById('count-modal-backdrop').classList.remove('open');
+}
+function adjustCount(delta) {
+  const el = document.getElementById('count-val');
+  customTestCount = Math.min(200, Math.max(10, (parseInt(el.textContent)||75) + delta));
+  el.textContent = customTestCount;
+}
+function confirmCount() {
+  closeCountModal();
+  openTestModal(customTestCount);
+}
+
+// ── Question selection logic ───────────────────────────────────
+async function launchCustomTest() {
+  document.getElementById('tema-modal-backdrop').classList.remove('open');
+  showLoading('Preparando test...');
+  try {
+    const N = customTestCount;
+
+    // 1. Fetch candidate questions filtered by tema scope
+    let query = sb.from('questions').select('id, number, exam_id, tema, tema_subject, is_annulled');
+    if (customTestScope === 'select' && selectedTemas.size > 0) {
+      query = query.in('tema', [...selectedTemas]);
+    }
+    const { data: allQs } = await query.eq('is_annulled', false);
+    if (!allQs || !allQs.length) { showToast('No hay preguntas para estos temas'); hideLoading(); return; }
+
+    // 2. Fetch this user's most recent attempt result per question
+    const { data: myAttempts } = await sb.from('attempts')
+      .select('id')
+      .eq('user_id', user.id)
+      .in('status', ['complete', 'partial', 'in_progress']);
+    const myAttemptIds = (myAttempts||[]).map(a => a.id);
+
+    let wrongQIds = new Set();
+    let lastAnsweredAt = {}; // qId -> ISO string
+
+    if (myAttemptIds.length) {
+      const candidateIds = allQs.map(q => q.id);
+      const { data: qAttempts } = await sb.from('question_attempts')
+        .select('question_id, is_correct, answered_at')
+        .in('attempt_id', myAttemptIds)
+        .in('question_id', candidateIds.length ? candidateIds : ['00000000-0000-0000-0000-000000000000'])
+        .order('answered_at', {ascending: false});
+
+      // Per question, keep only the most recent attempt result
+      const seenQ = new Set();
+      (qAttempts||[]).forEach(qa => {
+        if (!seenQ.has(qa.question_id)) {
+          seenQ.add(qa.question_id);
+          if (!qa.is_correct) wrongQIds.add(qa.question_id);
+          if (qa.answered_at) lastAnsweredAt[qa.question_id] = qa.answered_at;
+        }
+      });
+    }
+
+    // 3. Group questions by tema
+    const byTema = {};
+    allQs.forEach(q => {
+      const t = q.tema || 'Sin tema';
+      if (!byTema[t]) byTema[t] = [];
+      byTema[t].push(q);
+    });
+    const temas = Object.keys(byTema);
+    const nTemas = temas.length;
+
+    // 4. Allocate slots per tema — divide N evenly, spread remainder round-robin
+    const baseSlots = Math.floor(N / nTemas);
+    let remainder   = N % nTemas;
+    const slots = {};
+    temas.forEach(t => { slots[t] = baseSlots; });
+    // Give remainder slots to temas with the most questions available (most room)
+    temas.slice().sort((a,b) => byTema[b].length - byTema[a].length)
+         .slice(0, remainder)
+         .forEach(t => { slots[t]++; });
+
+    // 5. Within each tema, fill slots using priority: wrong → never seen → oldest first
+    const selected = [];
+    const overflow = []; // questions from temas that couldn't fill their slot
+
+    temas.forEach(t => {
+      const qs = byTema[t];
+      const wrong      = shuffle(qs.filter(q => wrongQIds.has(q.id)));
+      const neverSeen  = shuffle(qs.filter(q => !wrongQIds.has(q.id) && !lastAnsweredAt[q.id]));
+      const oldest     = qs.filter(q => !wrongQIds.has(q.id) && lastAnsweredAt[q.id])
+                           .sort((a,b) => lastAnsweredAt[a.id].localeCompare(lastAnsweredAt[b.id]));
+      const ordered    = [...wrong, ...neverSeen, ...oldest];
+      const alloc      = slots[t];
+      selected.push(...ordered.slice(0, alloc));
+      // If we couldn't fill the slot, note how many are missing (not needed — overflow fills from others)
+      // If we have extras beyond alloc, add to overflow pool for redistribution
+      overflow.push(...ordered.slice(alloc));
+    });
+
+    // 6. If selected < N (some temas didn't have enough questions), fill from overflow
+    if (selected.length < N && overflow.length) {
+      // Overflow is already prioritised within each tema; shuffle so no tema dominates the fill
+      shuffle(overflow);
+      selected.push(...overflow.slice(0, N - selected.length));
+    }
+
+    // Final cap at N
+    const finalSelected = selected.slice(0, N);
+
+    if (!finalSelected.length) { showToast('No hay preguntas disponibles'); hideLoading(); return; }
+
+    // 7. Fetch full question data
+    const selectedIds = finalSelected.map(q => q.id);
+    const { data: fullQs } = await sb.from('questions').select('*').in('id', selectedIds);
+
+    // Preserve prioritised order
+    const idxMap = {};
+    selectedIds.forEach((id,i) => idxMap[id] = i);
+    const orderedQs = (fullQs||[]).sort((a,b) => idxMap[a.id] - idxMap[b.id]);
+
+    // 8. Create custom_test record
+    const { error: ctErr } = await sb.from('custom_tests').insert({
+      user_id: user.id,
+      type: 'custom_set',
+      question_ids: selectedIds,
+      status: 'in_progress',
+      total_answered: 0, total_correct: 0, total_incorrect: 0, skipped: 0,
+      last_question_index: 0,
+      score_pct: 0,
+    });
+    if (ctErr) throw new Error('custom_tests insert: ' + ctErr.message);
+
+    // Fetch the newly created record separately (avoids RLS timing issues with .select().single())
+    const { data: ct, error: ctFetchErr } = await sb.from('custom_tests')
+      .select('id')
+      .eq('user_id', user.id)
+      .eq('status', 'in_progress')
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .single();
+    if (ctFetchErr) throw new Error('custom_tests fetch: ' + ctFetchErr.message);
+    if (!ct) throw new Error('custom_tests: could not retrieve new record');
+    customTestId = ct.id;
+
+    // 9. Launch exam screen
+    const temaLabel = customTestScope === 'all'
+      ? 'todos los temas'
+      : `${selectedTemas.size} tema${selectedTemas.size>1?'s':''}`;
+    exam = {id: null, name: `Test ${orderedQs.length}Q — ${temaLabel}`, totalQ: orderedQs.length, isCustom: true};
+    questions = orderedQs;
+    score = {c:0, w:0, s:0};
+    answeredMap = {};
+    viewIdx = null;
+    idx = 0;
+    attemptId = null;
+
+    showScreen('exam');
+    renderQuestion();
+  } catch(e) {
+    console.error('Custom test error:', e);
+    showToast('Error: ' + (e?.message || 'desconocido'));
+  } finally { hideLoading(); }
+}
+
+
+function shuffle(arr) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+</script>
+<style>
+:root {
+  --bg:#0d0f14;--surface:#161b24;--surface2:#1e2535;--border:#2a3347;
+  --accent:#3b82f6;--glow:rgba(59,130,246,0.25);--green:#22c55e;
+  --red:#ef4444;--yellow:#f59e0b;--text:#e8eaf0;--muted:#6b7a99;
+  --r:14px;--body:'Georgia','Times New Roman',serif;
+  --ui:system-ui,-apple-system,sans-serif;
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--ui);-webkit-font-smoothing:antialiased;overflow-x:hidden}
+.screen{display:none;min-height:100vh;flex-direction:column}
+.screen.active{display:flex}
+
+/* AUTH */
+#screen-auth{align-items:center;justify-content:center;padding:32px 24px;
+  background:radial-gradient(ellipse at 50% 0%,rgba(59,130,246,.12) 0%,transparent 70%)}
+.auth-logo{font-size:48px;margin-bottom:8px}
+.auth-title{font-size:28px;font-weight:700;margin-bottom:4px}
+.auth-sub{color:var(--muted);font-size:14px;margin-bottom:40px}
+.auth-card{width:100%;max-width:380px;background:var(--surface);border:1px solid var(--border);border-radius:20px;padding:28px 24px}
+.tab-row{display:flex;background:var(--surface2);border-radius:10px;padding:4px;margin-bottom:24px}
+.tab{flex:1;padding:8px;text-align:center;border-radius:8px;font-size:14px;font-weight:500;cursor:pointer;color:var(--muted);transition:all .2s;border:none;background:transparent}
+.tab.active{background:var(--accent);color:#fff}
+.lbl{font-size:12px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px}
+.inp{width:100%;padding:12px 14px;background:var(--surface2);border:1px solid var(--border);border-radius:10px;color:var(--text);font-size:16px;margin-bottom:16px;outline:none;transition:border-color .2s;-webkit-appearance:none}
+.inp:focus{border-color:var(--accent)}
+.btn{width:100%;padding:14px;background:var(--accent);color:#fff;border:none;border-radius:12px;font-size:16px;font-weight:600;cursor:pointer;transition:opacity .2s,transform .1s;-webkit-appearance:none}
+.btn:active{transform:scale(.98);opacity:.9}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.btn.ghost{background:transparent;border:1px solid var(--border);color:var(--muted)}
+.btn.danger{background:var(--red)}
+.btn.sm{padding:10px 20px;font-size:14px;width:auto}
+.auth-err{color:var(--red);font-size:13px;margin-top:12px;text-align:center;min-height:18px}
+
+/* HOME */
+#screen-home{background:var(--bg)}
+.home-hdr{padding:56px 20px 20px;background:linear-gradient(to bottom,rgba(59,130,246,.08),transparent)}
+.greeting{font-size:13px;color:var(--muted);margin-bottom:4px}
+.home-title{font-size:26px;font-weight:700}
+.home-row{display:flex;align-items:center;justify-content:space-between;margin-bottom:4px}
+.sec-title{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--muted);padding:20px 20px 10px}
+.exam-list{padding:0 16px 140px;display:flex;flex-direction:column;gap:10px}
+.exam-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:18px 16px;cursor:pointer;transition:transform .15s,border-color .15s;display:flex;justify-content:space-between;align-items:center;gap:12px}
+.exam-card:active{transform:scale(.98);border-color:var(--accent)}
+.exam-name{font-size:17px;font-weight:600;margin-bottom:4px}
+.exam-meta{font-size:13px;color:var(--muted)}
+.score-area{text-align:right;flex-shrink:0}
+.score-num{font-size:20px;font-weight:700;line-height:1}
+.score-num.good{color:var(--green)}.score-num.mid{color:var(--yellow)}.score-num.bad{color:var(--red)}.score-num.none{color:var(--muted);font-size:13px;font-weight:400}
+.score-lbl{font-size:11px;color:var(--muted);margin-top:2px}
+.att-badge{display:inline-block;font-size:11px;font-weight:700;border-radius:20px;padding:2px 8px;margin-top:4px;border:1px solid}
+.att-badge.resume{background:rgba(59,130,246,.12);color:var(--accent);border-color:rgba(59,130,246,.3)}
+.att-badge.partial{background:rgba(107,122,153,.12);color:var(--muted);border-color:rgba(107,122,153,.3)}
+.chevron{color:var(--muted);font-size:18px;margin-left:4px}
+.empty{padding:40px 20px;text-align:center;color:var(--muted);font-size:15px}
+.sign-out{font-size:13px;color:var(--muted);cursor:pointer;padding:4px 8px;border-radius:6px;border:1px solid var(--border);background:transparent}
+
+/* EXAM */
+#screen-exam{background:var(--bg)}
+.topbar{position:sticky;top:0;z-index:10;background:var(--bg);border-bottom:1px solid var(--border);padding:12px 16px;display:flex;align-items:center;gap:10px}
+.back-btn{background:var(--surface);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px;padding:6px 12px;cursor:pointer;flex-shrink:0}
+.nav-btn{background:var(--surface);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:16px;padding:6px 10px;cursor:pointer;flex-shrink:0;line-height:1}
+.nav-btn:disabled{opacity:.3;cursor:not-allowed}
+.prog-wrap{flex:1;min-width:0}
+.prog-lbl{font-size:12px;color:var(--muted);margin-bottom:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.prog-bar{height:4px;background:var(--surface2);border-radius:2px;overflow:hidden}
+.prog-fill{height:100%;background:var(--accent);border-radius:2px;transition:width .4s ease}
+.score-chip{font-size:12px;padding:4px 10px;border-radius:20px;background:var(--surface2);white-space:nowrap;flex-shrink:0}
+.q-scroll{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:20px 16px 160px}
+.tema-tag{display:inline-block;font-size:11px;font-weight:600;color:#a78bfa;background:rgba(167,139,250,.1);padding:3px 10px;border-radius:20px;margin-bottom:8px;border:1px solid rgba(167,139,250,.2)}
+.q-num-tag{display:inline-block;font-size:12px;font-weight:700;color:var(--accent);background:var(--glow);padding:3px 10px;border-radius:20px;margin-bottom:14px}
+.q-text{font-family:var(--body);font-size:16px;line-height:1.7;margin-bottom:20px}
+.img-ref{display:inline-flex;align-items:center;gap:4px;background:rgba(59,130,246,.15);color:var(--accent);padding:2px 8px;border-radius:6px;font-size:13px;font-weight:600;cursor:pointer;border:1px solid rgba(59,130,246,.3);font-family:var(--ui);transition:background .15s;white-space:nowrap;text-decoration:none}
+.img-ref:hover{background:rgba(59,130,246,.25)}
+.opts{display:flex;flex-direction:column;gap:10px;margin-bottom:24px}
+.opt{width:100%;text-align:left;padding:14px 16px;background:var(--surface);border:1.5px solid var(--border);border-radius:var(--r);color:var(--text);font-size:15px;line-height:1.5;cursor:pointer;display:flex;gap:12px;align-items:flex-start;transition:border-color .15s,background .15s;font-family:var(--body);-webkit-appearance:none}
+.opt:active:not([disabled]){transform:scale(.99)}
+.opt-n{flex-shrink:0;width:24px;height:24px;border-radius:50%;background:var(--surface2);display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;font-family:var(--ui);color:var(--muted);margin-top:1px}
+.opt.correct{border-color:var(--green);background:rgba(34,197,94,.08)}
+.opt.correct .opt-n{background:var(--green);color:#fff}
+.opt.wrong{border-color:var(--red);background:rgba(239,68,68,.08)}
+.opt.wrong .opt-n{background:var(--red);color:#fff}
+.opt.dimmed{opacity:.45}
+.opt[disabled]{cursor:not-allowed}
+/* Reviewing a past question */
+.reviewing-banner{background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.25);border-radius:10px;padding:10px 14px;margin-bottom:16px;font-size:13px;color:var(--yellow);display:flex;justify-content:space-between;align-items:center;gap:12px}
+.jump-btn{background:var(--accent);color:#fff;border:none;border-radius:8px;padding:6px 14px;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;flex-shrink:0}
+
+/* FEEDBACK */
+.feedback{position:fixed;bottom:0;left:0;right:0;padding:16px 16px calc(16px + env(safe-area-inset-bottom));transform:translateY(100%);transition:transform .35s cubic-bezier(.34,1.56,.64,1);z-index:20;display:flex;align-items:flex-start;gap:12px}
+.feedback.show{transform:translateY(0)}
+.feedback.correct{background:linear-gradient(to top,rgba(34,197,94,.18),rgba(34,197,94,.05));border-top:1px solid rgba(34,197,94,.3)}
+.feedback.wrong{background:linear-gradient(to top,rgba(239,68,68,.18),rgba(239,68,68,.05));border-top:1px solid rgba(239,68,68,.3)}
+.feedback.annulled{background:linear-gradient(to top,rgba(107,122,153,.18),rgba(107,122,153,.05));border-top:1px solid rgba(107,122,153,.3)}
+.fb-icon{font-size:28px;flex-shrink:0}
+.fb-body{flex:1;min-width:0}
+.fb-title{font-size:16px;font-weight:700;margin-bottom:4px}
+.fb-sub{font-size:13px;color:var(--muted)}
+.feedback.correct .fb-title{color:var(--green)}
+.feedback.wrong   .fb-title{color:var(--red)}
+.rationale-toggle{margin-top:8px;font-size:13px;color:var(--accent);cursor:pointer;display:inline-flex;align-items:center;gap:4px;font-weight:600;background:none;border:none;padding:0;font-family:var(--ui)}
+.rationale-box{margin-top:8px;background:rgba(255,255,255,.04);border:1px solid var(--border);border-radius:10px;padding:12px 14px;font-size:13px;line-height:1.6;display:none;max-height:160px;overflow-y:auto}
+.rationale-box.open{display:block}
+.siguiente-btn{margin-top:12px;padding:12px 24px;background:var(--accent);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:600;cursor:pointer;width:100%;font-family:var(--ui)}
+
+/* EXIT MODAL */
+.modal-backdrop{display:none;position:fixed;inset:0;z-index:50;background:rgba(0,0,0,.7);align-items:flex-end;justify-content:center}
+.modal-backdrop.open{display:flex}
+.modal{background:var(--surface);border:1px solid var(--border);border-radius:20px 20px 0 0;padding:24px 20px calc(24px + env(safe-area-inset-bottom));width:100%;max-width:480px}
+.modal-title{font-size:18px;font-weight:700;margin-bottom:8px}
+.modal-sub{font-size:14px;color:var(--muted);margin-bottom:20px;line-height:1.6}
+.modal-warn{background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.25);border-radius:10px;padding:12px 14px;font-size:13px;color:var(--text);margin-bottom:20px;line-height:1.5}
+.modal-actions{display:flex;flex-direction:column;gap:10px}
+
+/* IMAGE OVERLAY */
+.img-overlay{display:none;position:fixed;inset:0;z-index:100;background:rgba(0,0,0,.95);flex-direction:column;align-items:center;justify-content:flex-start;padding:0}
+.img-overlay.open{display:flex}
+.ov-header{width:100%;display:flex;justify-content:space-between;align-items:center;padding:12px 16px;flex-shrink:0}
+.ov-label{font-size:14px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:1px}
+.ov-close{width:36px;height:36px;border-radius:50%;background:var(--surface);border:1px solid var(--border);color:var(--text);font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center}
+.ov-img-wrap{flex:1;width:100%;overflow:hidden;display:flex;align-items:center;justify-content:center;touch-action:pinch-zoom}
+.ov-img{max-width:100%;max-height:100%;object-fit:contain;user-select:none}
+.ov-tabs{display:flex;gap:8px;padding:12px 16px;flex-wrap:wrap;justify-content:center;flex-shrink:0}
+.ov-tab{padding:6px 14px;border-radius:20px;font-size:13px;font-weight:600;cursor:pointer;border:1px solid var(--border);background:var(--surface);color:var(--muted);transition:all .15s}
+.ov-tab.active{background:var(--accent);border-color:var(--accent);color:#fff}
+
+/* RESULTS */
+#screen-results{align-items:center;justify-content:center;padding:32px 20px;text-align:center}
+.res-emoji{font-size:64px;margin-bottom:16px}
+.res-title{font-size:24px;font-weight:700;margin-bottom:8px}
+.res-sub{color:var(--muted);font-size:15px;margin-bottom:32px}
+.res-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;width:100%;max-width:400px;margin-bottom:32px}
+.res-cell{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:16px 10px}
+.res-num{font-size:26px;font-weight:700;line-height:1;margin-bottom:4px}
+.res-num.g{color:var(--green)}.res-num.r{color:var(--red)}.res-num.m{color:var(--muted)}
+.res-lbl{font-size:11px;color:var(--muted)}
+.ring-wrap{position:relative;width:140px;height:140px;margin:0 auto 24px}
+.ring-svg{transform:rotate(-90deg)}
+.ring-bg{fill:none;stroke:var(--surface2);stroke-width:10}
+.ring-fill{fill:none;stroke-width:10;stroke-linecap:round;transition:stroke-dashoffset 1s ease}
+.ring-txt{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center}
+.ring-pct{font-size:28px;font-weight:700}
+.ring-lbl-s{font-size:11px;color:var(--muted)}
+
+.annulled-notice{background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:12px 14px;margin-bottom:16px;font-size:13px;color:var(--muted)}
+.loading{position:fixed;inset:0;z-index:200;background:var(--bg);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px}
+.spinner{width:40px;height:40px;border:3px solid var(--surface2);border-top-color:var(--accent);border-radius:50%;animation:spin .7s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.loading-txt{color:var(--muted);font-size:14px}
+.toast{position:fixed;bottom:90px;left:50%;transform:translateX(-50%) translateY(20px);background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:10px 18px;font-size:14px;opacity:0;transition:all .3s;pointer-events:none;z-index:300;white-space:nowrap}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+
+/* CUSTOM TEST BAR */
+.test-bar{position:fixed;bottom:0;left:0;right:0;z-index:30;padding:12px 16px calc(12px + env(safe-area-inset-bottom));background:var(--surface);border-top:1px solid var(--border);display:none}
+.test-bar.visible{display:block}
+.test-bar-label{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--muted);text-align:center;margin-bottom:8px}
+.test-bar-btns{display:flex;gap:8px}
+.test-btn{flex:1;padding:13px 6px;background:var(--surface2);border:1px solid var(--border);border-radius:12px;color:var(--text);font-size:14px;font-weight:700;cursor:pointer;transition:all .15s;text-align:center;line-height:1.2}
+.test-btn:active{transform:scale(.97);border-color:var(--accent)}
+.test-btn span{display:block;font-size:11px;font-weight:400;color:var(--muted);margin-top:2px}
+.test-btn.primary{background:rgba(59,130,246,.12);border-color:rgba(59,130,246,.3);color:var(--accent)}
+.test-btn.primary span{color:rgba(59,130,246,.6)}
+
+/* TEMA MODAL */
+.tema-modal-backdrop{display:none;position:fixed;inset:0;z-index:60;background:rgba(0,0,0,.75);align-items:flex-end;justify-content:center}
+.tema-modal-backdrop.open{display:flex}
+.tema-modal{background:var(--surface);border:1px solid var(--border);border-radius:20px 20px 0 0;padding:20px 20px calc(20px + env(safe-area-inset-bottom));width:100%;max-width:480px;max-height:85vh;display:flex;flex-direction:column}
+.tema-modal-title{font-size:18px;font-weight:700;margin-bottom:4px}
+.tema-modal-sub{font-size:13px;color:var(--muted);margin-bottom:16px}
+.tema-scope-row{display:flex;gap:8px;margin-bottom:16px}
+.tema-scope-btn{flex:1;padding:10px;border-radius:10px;font-size:14px;font-weight:600;cursor:pointer;border:1px solid var(--border);background:var(--surface2);color:var(--muted);transition:all .15s}
+.tema-scope-btn.active{background:rgba(59,130,246,.12);border-color:rgba(59,130,246,.4);color:var(--accent)}
+.tema-list{overflow-y:auto;flex:1;display:flex;flex-direction:column;gap:6px;margin-bottom:16px}
+.tema-item{display:flex;align-items:center;gap:12px;padding:12px 14px;background:var(--surface2);border:1px solid var(--border);border-radius:10px;cursor:pointer;transition:border-color .15s}
+.tema-item.selected{border-color:rgba(59,130,246,.5);background:rgba(59,130,246,.07)}
+.tema-check{width:20px;height:20px;border-radius:6px;border:2px solid var(--border);flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:12px;transition:all .15s}
+.tema-item.selected .tema-check{background:var(--accent);border-color:var(--accent);color:#fff}
+.tema-item-name{font-size:13px;font-weight:500;line-height:1.4}
+.tema-modal-start{width:100%;padding:14px;background:var(--accent);color:#fff;border:none;border-radius:12px;font-size:16px;font-weight:600;cursor:pointer;font-family:var(--ui)}
+.tema-modal-start:disabled{opacity:.4;cursor:not-allowed}
+
+/* CUSTOM COUNT MODAL */
+.count-modal-backdrop{display:none;position:fixed;inset:0;z-index:60;background:rgba(0,0,0,.75);align-items:center;justify-content:center;padding:24px}
+.count-modal-backdrop.open{display:flex}
+.count-modal{background:var(--surface);border:1px solid var(--border);border-radius:20px;padding:24px 20px;width:100%;max-width:340px}
+.count-modal-title{font-size:18px;font-weight:700;margin-bottom:4px}
+.count-modal-sub{font-size:13px;color:var(--muted);margin-bottom:20px}
+.count-inp-wrap{display:flex;align-items:center;justify-content:center;gap:16px;margin-bottom:20px}
+.count-adj{width:44px;height:44px;border-radius:50%;border:1px solid var(--border);background:var(--surface2);color:var(--text);font-size:22px;cursor:pointer;display:flex;align-items:center;justify-content:center;line-height:1}
+.count-val{font-size:40px;font-weight:700;min-width:80px;text-align:center}
+.count-modal-btns{display:flex;gap:10px}
+.count-modal-btns button{flex:1;padding:12px;border-radius:12px;font-size:15px;font-weight:600;cursor:pointer;font-family:var(--ui)}
+</style>
+</head>
+<body>
+
+<!-- AUTH -->
+<div id="screen-auth" class="screen active">
+  <div class="auth-logo">🩺</div>
+  <div class="auth-title">MIR Prep</div>
+  <div class="auth-sub">Prepara tu examen MIR</div>
+  <div class="auth-card">
+    <div class="tab-row">
+      <button class="tab active" onclick="setAuthMode('login')">Iniciar sesión</button>
+      <button class="tab" onclick="setAuthMode('register')">Registrarse</button>
+    </div>
+    <div class="lbl">Correo electrónico</div>
+    <input class="inp" type="email" id="auth-email" placeholder="tu@email.com" autocomplete="email">
+    <div class="lbl">Contraseña</div>
+    <input class="inp" type="password" id="auth-pass" placeholder="••••••••" autocomplete="current-password">
+    <button class="btn" id="auth-btn" onclick="handleAuth()">Entrar</button>
+    <div class="auth-err" id="auth-err"></div>
+  </div>
+</div>
+
+<!-- HOME -->
+<div id="screen-home" class="screen">
+  <div class="home-hdr">
+    <div class="home-row">
+      <div><div class="greeting">Bienvenido/a</div><div class="home-title">Exámenes MIR</div></div>
+      <button class="sign-out" onclick="signOut()">Salir</button>
+    </div>
+  </div>
+  <div class="sec-title">Selecciona un examen</div>
+  <div class="exam-list" id="exam-list"><div class="empty">Cargando exámenes...</div></div>
+</div>
+
+<!-- TEST BAR -->
+<div class="test-bar" id="test-bar">
+  <div class="test-bar-label">Test Personalizado</div>
+  <div class="test-bar-btns">
+    <button class="test-btn" onclick="openTestModal(50)">50<span>preguntas</span></button>
+    <button class="test-btn primary" onclick="openTestModal(100)">100<span>preguntas</span></button>
+    <button class="test-btn" onclick="openCountModal()">N<span>elegir</span></button>
+  </div>
+</div>
+
+<!-- TEMA SELECTION MODAL -->
+<div class="tema-modal-backdrop" id="tema-modal-backdrop" onclick="if(event.target===this)closeTestModal()">
+  <div class="tema-modal">
+    <div class="tema-modal-title" id="tema-modal-title">Test de 100 preguntas</div>
+    <div class="tema-modal-sub">¿Qué temas quieres incluir?</div>
+    <div class="tema-scope-row">
+      <button class="tema-scope-btn active" id="scope-all" onclick="setTemaScope('all')">Todos los temas</button>
+      <button class="tema-scope-btn" id="scope-select" onclick="setTemaScope('select')">Elegir temas</button>
+    </div>
+    <div class="tema-list" id="tema-list" style="display:none"></div>
+    <button class="tema-modal-start" id="tema-modal-start" onclick="launchCustomTest()">Empezar test</button>
+  </div>
+</div>
+
+<!-- CUSTOM COUNT MODAL -->
+<div class="count-modal-backdrop" id="count-modal-backdrop" onclick="if(event.target===this)closeCountModal()">
+  <div class="count-modal">
+    <div class="count-modal-title">¿Cuántas preguntas?</div>
+    <div class="count-modal-sub">Elige el número de preguntas para el test</div>
+    <div class="count-inp-wrap">
+      <button class="count-adj" onclick="adjustCount(-10)">−</button>
+      <div class="count-val" id="count-val">75</div>
+      <button class="count-adj" onclick="adjustCount(10)">+</button>
+    </div>
+    <div class="count-modal-btns">
+      <button class="btn ghost" onclick="closeCountModal()">Cancelar</button>
+      <button class="btn" onclick="confirmCount()">Continuar</button>
+    </div>
+  </div>
+</div>
+
+<!-- EXAM -->
+<div id="screen-exam" class="screen">
+  <div class="topbar">
+    <button class="back-btn" onclick="requestExit()">← Salir</button>
+    <button class="nav-btn" id="nav-prev" onclick="navPrev()" disabled>‹</button>
+    <div class="prog-wrap">
+      <div class="prog-lbl" id="prog-lbl">Pregunta 1 de 210</div>
+      <div class="prog-bar"><div class="prog-fill" id="prog-fill" style="width:0%"></div></div>
+    </div>
+    <button class="nav-btn" id="nav-next" onclick="navNext()" disabled>›</button>
+    <div class="score-chip" id="score-chip">✓ 0 &nbsp;✗ 0</div>
+  </div>
+  <div class="q-scroll" id="q-scroll">
+    <div class="reviewing-banner" id="reviewing-banner" style="display:none">
+      <span>Revisando pregunta anterior</span>
+      <button class="jump-btn" onclick="jumpToCurrent()">Pregunta actual →</button>
+    </div>
+    <div class="tema-tag" id="tema-tag" style="display:none"></div>
+    <div class="q-num-tag" id="q-tag">Pregunta 1</div>
+    <div class="q-text" id="q-text"></div>
+    <div class="opts" id="opts"></div>
+  </div>
+  <div class="feedback" id="feedback">
+    <div class="fb-icon" id="fb-icon"></div>
+    <div class="fb-body">
+      <div class="fb-title" id="fb-title"></div>
+      <div class="fb-sub" id="fb-sub"></div>
+      <button class="rationale-toggle" id="rat-toggle" onclick="toggleRationale()" style="display:none">📖 Ver comentario</button>
+      <div class="rationale-box" id="rat-box"></div>
+      <button class="siguiente-btn" id="siguiente-btn" onclick="advanceFromWrong()" style="display:none">Siguiente →</button>
+    </div>
+  </div>
+</div>
+
+<!-- RESULTS -->
+<div id="screen-results" class="screen">
+  <div class="res-emoji" id="res-emoji">🏆</div>
+  <div class="res-title" id="res-title">¡Examen completado!</div>
+  <div class="res-sub" id="res-sub"></div>
+  <div class="ring-wrap">
+    <svg class="ring-svg" width="140" height="140" viewBox="0 0 140 140">
+      <circle class="ring-bg" cx="70" cy="70" r="60"/>
+      <circle class="ring-fill" id="ring-fill" cx="70" cy="70" r="60" stroke-dasharray="377" stroke-dashoffset="377"/>
+    </svg>
+    <div class="ring-txt"><div class="ring-pct" id="ring-pct">0%</div><div class="ring-lbl-s">aciertos</div></div>
+  </div>
+  <div class="res-grid">
+    <div class="res-cell"><div class="res-num g" id="res-c">0</div><div class="res-lbl">Correctas</div></div>
+    <div class="res-cell"><div class="res-num r" id="res-w">0</div><div class="res-lbl">Incorrectas</div></div>
+    <div class="res-cell"><div class="res-num m" id="res-s">0</div><div class="res-lbl">Anuladas</div></div>
+  </div>
+  <button class="btn" style="max-width:320px" onclick="goHome()">Volver al inicio</button>
+</div>
+
+<!-- EXIT MODAL -->
+<div class="modal-backdrop" id="exit-modal">
+  <div class="modal">
+    <div class="modal-title">¿Salir del examen?</div>
+    <div class="modal-sub">Tienes <span id="exit-answered">0</span> preguntas respondidas. ¿Qué quieres hacer?</div>
+    <div class="modal-actions">
+      <button class="btn" onclick="exitResume()">⏸ Guardar y continuar después</button>
+      <button class="btn ghost" onclick="exitPartial()">💾 Registrar intento parcial</button>
+      <button class="btn ghost" style="color:var(--red);border-color:rgba(239,68,68,.3)" onclick="showDiscardWarning()">✕ Descartar</button>
+    </div>
+  </div>
+</div>
+
+<!-- DISCARD CONFIRM MODAL -->
+<div class="modal-backdrop" id="discard-modal">
+  <div class="modal">
+    <div class="modal-title">¿Descartar el intento?</div>
+    <div class="modal-warn">⚠️ Tus respuestas a las <strong><span id="discard-count">0</span> preguntas</strong> respondidas no quedarán registradas. Esta acción no se puede deshacer.</div>
+    <div class="modal-actions">
+      <button class="btn danger" onclick="exitDiscard()">Sí, descartar todo</button>
+      <button class="btn ghost" onclick="closeDiscard()">Cancelar</button>
+    </div>
+  </div>
+</div>
+
+<!-- IMAGE OVERLAY -->
+<div class="img-overlay" id="img-overlay">
+  <div class="ov-header">
+    <div class="ov-label" id="ov-label">Imagen</div>
+    <button class="ov-close" onclick="closeImg()">✕</button>
+  </div>
+  <div class="ov-img-wrap" id="ov-wrap">
+    <img class="ov-img" id="ov-img" src="" alt="Imagen del examen" draggable="false">
+  </div>
+  <div class="ov-tabs" id="ov-tabs"></div>
+</div>
+
+<div class="loading" id="loading"><div class="spinner"></div><div class="loading-txt" id="loading-txt">Cargando...</div></div>
+<div class="toast" id="toast"></div>
+
+<script>
+const SUPABASE_URL  = 'https://epbolpgvgdztvtvhanxt.supabase.co';
+const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVwYm9scGd2Z2R6dHZ0dmhhbnh0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU5NjQ3OTgsImV4cCI6MjA5MTU0MDc5OH0.u-Ly4X0KMcEZfGpWz4OP9NnhAEsk-fOz5unkrMoTtfY';
+
+const { createClient } = supabase;
+const sb = createClient(SUPABASE_URL, SUPABASE_ANON);
+
+// State
+let user = null;
+let exam = null;
+let questions = [];
+let idx = 0;          // current position (always the live unanswered question)
+let viewIdx = null;   // null = viewing current; number = reviewing a past question
+let attemptId = null;
+let customTestId = null;
+let answeredMap = {}; // {questionId: {selected, isCorrect, skipped}}
+let score = {c:0, w:0, s:0};
+let fbTimer = null;
+let authMode = 'login';
+let latestAttempts = {};
+
+// Init
+window.addEventListener('load', async () => {
+  try {
+    const { data: { session } } = await sb.auth.getSession();
+    if (session?.user) { user = session.user; showScreen('home'); loadHome(); }
+    else hideLoading();
+  } catch { hideLoading(); }
+});
+sb.auth.onAuthStateChange((_e, session) => {
+  if (!session && user) { user = null; showScreen('auth'); }
+});
+
+// ── Auth ──────────────────────────────────────────────────────
+function setAuthMode(m) {
+  authMode = m;
+  document.querySelectorAll('.tab').forEach((t,i) => t.classList.toggle('active', i===(m==='login'?0:1)));
+  document.getElementById('auth-btn').textContent = m==='login' ? 'Entrar' : 'Crear cuenta';
+}
+async function handleAuth() {
+  const email = document.getElementById('auth-email').value.trim();
+  const pass  = document.getElementById('auth-pass').value;
+  const errEl = document.getElementById('auth-err');
+  errEl.textContent = ''; errEl.style.color = 'var(--red)';
+  if (!email || !pass) { errEl.textContent = 'Completa todos los campos'; return; }
+  if (pass.length < 6) { errEl.textContent = 'La contraseña debe tener al menos 6 caracteres'; return; }
+  const btn = document.getElementById('auth-btn');
+  btn.disabled = true; btn.textContent = '...';
+  try {
+    const res = authMode === 'login'
+      ? await sb.auth.signInWithPassword({email, password: pass})
+      : await sb.auth.signUp({email, password: pass});
+    if (res.error) { errEl.textContent = res.error.message; return; }
+    if (authMode === 'register' && !res.data.session) {
+      errEl.style.color = 'var(--green)';
+      errEl.textContent = 'Revisa tu email para confirmar la cuenta.'; return;
+    }
+    user = res.data.user || res.data.session?.user;
+    showScreen('home'); loadHome();
+  } finally {
+    btn.disabled = false;
+    btn.textContent = authMode === 'login' ? 'Entrar' : 'Crear cuenta';
+  }
+}
+async function signOut() { await sb.auth.signOut(); showScreen('auth'); }
+
+// ── Home ──────────────────────────────────────────────────────
+async function loadHome() {
+  showLoading('Cargando exámenes...');
+  document.getElementById('test-bar').classList.add('visible');
+  try {
+    const { data: exams } = await sb.from('exams').select('*').order('year', {ascending:false});
+    const { data: attempts } = await sb.from('latest_attempts').select('*').eq('user_id', user.id);
+    latestAttempts = {};
+    (attempts||[]).forEach(a => { latestAttempts[a.exam_id] = a; });
+    renderExamList(exams || []);
+  } catch(e) { showToast('Error cargando exámenes'); console.error(e); }
+  finally { hideLoading(); }
+}
+
+function renderExamList(exams) {
+  const el = document.getElementById('exam-list');
+  if (!exams.length) { el.innerHTML = '<div class="empty">No hay exámenes disponibles todavía.</div>'; return; }
+  el.innerHTML = exams.map(ex => {
+    const att = latestAttempts[ex.id];
+    let scoreHtml = '<div class="score-num none">Sin intentos</div>';
+    let badgeHtml = '';
+    // canResume is ONLY true for in_progress — partial attempts start fresh
+    const canResume = att && att.status === 'in_progress';
+
+    if (att) {
+      if (att.status === 'in_progress') {
+        const done = (att.total_correct||0) + (att.total_incorrect||0);
+        scoreHtml = `<div class="score-num none">${done}/${ex.total_questions}</div><div class="score-lbl">respondidas</div>`;
+        badgeHtml = `<div class="att-badge resume">▶ Reanudar</div>`;
+      } else if (att.status === 'partial') {
+        const done = (att.total_correct||0) + (att.total_incorrect||0);
+        scoreHtml = `<div class="score-num none">${att.total_correct||0}/${done}</div><div class="score-lbl">correctas de las intentadas</div>`;
+        badgeHtml = `<div class="att-badge partial">Último intento: parcial</div>`;
+      } else if (att.status === 'complete') {
+        const pct = Math.round(att.score_pct||0);
+        const cls = pct>=70?'good':pct>=50?'mid':'bad';
+        scoreHtml = `<div class="score-num ${cls}">${pct}%</div><div class="score-lbl">${att.total_correct}/${att.total_answered} correctas</div>`;
+      }
+    }
+
+    return `<div class="exam-card" onclick="startExam('${ex.id}','${esc(ex.name)}',${ex.total_questions},${canResume?`'${att.id}'`:'null'})">
+      <div><div class="exam-name">${esc(ex.name)}</div><div class="exam-meta">${ex.total_questions} preguntas</div>${badgeHtml}</div>
+      <div class="score-area">${scoreHtml}</div>
+      <span class="chevron">›</span>
+    </div>`;
+  }).join('');
+}
+
+// ── Start / Resume ────────────────────────────────────────────
+async function startExam(examId, examName, totalQ, existingAttemptId) {
+  showLoading('Cargando preguntas...');
+  try {
+    exam = {id:examId, name:examName, totalQ};
+    score = {c:0, w:0, s:0};
+    answeredMap = {};
+    viewIdx = null;
+    customTestId = null;
+
+    const { data: qs, error } = await sb.from('questions').select('*')
+      .eq('exam_id', examId).order('number', {ascending:true});
+    if (error) throw error;
+    questions = qs || [];
+    if (!questions.length) { showToast('Este examen no tiene preguntas.'); return; }
+
+    if (existingAttemptId) {
+      // Resume in_progress attempt
+      const { data: prevAnswers } = await sb.from('question_attempts')
+        .select('question_id, selected_option, is_correct, skipped')
+        .eq('attempt_id', existingAttemptId);
+      (prevAnswers||[]).forEach(a => {
+        answeredMap[a.question_id] = {selected:a.selected_option, isCorrect:a.is_correct, skipped:a.skipped};
+        if (a.is_correct) score.c++;
+        else if (a.skipped) score.s++;
+        else score.w++;
+      });
+      attemptId = existingAttemptId;
+      await sb.from('attempts').update({status:'in_progress'}).eq('id', attemptId);
+      idx = questions.findIndex(q => !answeredMap[q.id]);
+      if (idx === -1) idx = questions.length;
+    } else {
+      // New attempt (always — partial attempts do not resume)
+      const { data: att, error: aErr } = await sb.from('attempts').insert({
+        user_id: user.id, exam_id: examId, status: 'in_progress',
+        total_answered:0, total_correct:0, total_incorrect:0, skipped:0
+      }).select().single();
+      if (aErr) throw aErr;
+      attemptId = att.id;
+      idx = 0;
+    }
+
+    showScreen('exam');
+    renderQuestion();
+  } catch(e) { console.error(e); showToast('Error cargando el examen'); }
+  finally { hideLoading(); }
+}
+
+// ── Navigation ────────────────────────────────────────────────
+function navPrev() {
+  // Can go back from current question or from any reviewed question
+  const pos = viewIdx !== null ? viewIdx : idx;
+  if (pos <= 0) return;
+  viewIdx = pos - 1;
+  renderQuestion();
+}
+
+function navNext() {
+  if (viewIdx === null) return; // already at current
+  const pos = viewIdx;
+  // Can go forward through answered questions, up to current
+  if (pos < idx - 1) {
+    viewIdx = pos + 1;
+  } else {
+    // Reached current question
+    viewIdx = null;
+  }
+  renderQuestion();
+}
+
+function jumpToCurrent() {
+  viewIdx = null;
+  renderQuestion();
+}
+
+function updateNavButtons() {
+  const pos = viewIdx !== null ? viewIdx : idx;
+  const answeredCount = Object.keys(answeredMap).length;
+  document.getElementById('nav-prev').disabled = pos <= 0 || answeredCount === 0;
+  // Next is enabled when reviewing (viewIdx set) and there's something ahead
+  document.getElementById('nav-next').disabled = viewIdx === null;
+}
+
+// ── Question rendering ─────────────────────────────────────────
+function renderQuestion() {
+  const pos = viewIdx !== null ? viewIdx : idx;
+  if (pos >= questions.length) { finishExam(); return; }
+
+  const q = questions[pos];
+  const reviewing = viewIdx !== null;
+
+  // Reviewing banner
+  document.getElementById('reviewing-banner').style.display = reviewing ? 'flex' : 'none';
+
+  // Progress — always reflects actual position in exam
+  document.getElementById('prog-lbl').textContent = exam.isCustom ? `Test — Pregunta ${idx+1} de ${questions.length}` : `Pregunta ${idx+1} de ${questions.length}`;
+  document.getElementById('prog-fill').style.width = `${(idx/questions.length)*100}%`;
+  document.getElementById('score-chip').innerHTML = `✓ ${score.c} &nbsp;✗ ${score.w}`;
+  document.getElementById('q-tag').textContent = `Pregunta ${q.number}${reviewing ? ' (revisando)' : ''}`;
+
+  const temaEl = document.getElementById('tema-tag');
+  if (q.tema) { temaEl.textContent = q.tema; temaEl.style.display='inline-block'; }
+  else temaEl.style.display='none';
+
+  document.getElementById('q-text').innerHTML = formatQText(q.text, q.image_refs||[], q.image_urls||{});
+  document.getElementById('q-scroll').scrollTop = 0;
+  hideFeedback();
+  updateNavButtons();
+
+  const optsEl = document.getElementById('opts');
+  const prev = answeredMap[q.id];
+
+  if (q.is_annulled) {
+    optsEl.innerHTML = `<div class="annulled-notice">⚠️ Esta pregunta fue <strong>anulada</strong> en el examen oficial. No tiene respuesta correcta.</div>`;
+    if (!reviewing && !prev) {
+      saveAnswer(q, null, false, true);
+      score.s++;
+      updateScoreChip();
+      setTimeout(() => { idx++; renderQuestion(); }, 2500);
+    }
+    return;
+  }
+
+  if (reviewing && prev) {
+    // Show locked answered state — no interaction
+    optsEl.innerHTML = [1,2,3,4].map(n => {
+      const txt = q[`option_${n}`] || ''; if (!txt) return '';
+      let cls = '';
+      if (n === q.correct_option) cls = 'correct';
+      else if (n === prev.selected && !prev.isCorrect) cls = 'wrong';
+      else cls = 'dimmed';
+      return `<button class="opt ${cls}" disabled>
+        <span class="opt-n">${n}</span><span>${esc(txt)}</span>
+      </button>`;
+    }).join('');
+    return;
+  }
+
+  // Normal unanswered question
+  optsEl.innerHTML = [1,2,3,4].map(n => {
+    const txt = q[`option_${n}`] || ''; if (!txt) return '';
+    return `<button class="opt" id="opt-${n}" onclick="selectOpt(${n})">
+      <span class="opt-n">${n}</span><span>${esc(txt)}</span>
+    </button>`;
+  }).join('');
+}
+
+function updateScoreChip() {
+  document.getElementById('score-chip').innerHTML = `✓ ${score.c} &nbsp;✗ ${score.w}`;
+}
+
+// ── Answer ────────────────────────────────────────────────────
+function selectOpt(chosen) {
+  if (viewIdx !== null) return; // can't answer while reviewing
+  const q = questions[idx];
+  if (!q || q.is_annulled) return;
+  const correct = q.correct_option;
+  const isCorrect = chosen === correct;
+
+  [1,2,3,4].forEach(n => {
+    const btn = document.getElementById(`opt-${n}`);
+    if (!btn) return;
+    btn.disabled = true;
+    if (n === correct) btn.classList.add('correct');
+    else if (n === chosen && !isCorrect) btn.classList.add('wrong');
+    else btn.classList.add('dimmed');
+  });
+
+  if (isCorrect) score.c++; else score.w++;
+  updateScoreChip();
+  answeredMap[q.id] = {selected:chosen, isCorrect};
+  saveAnswer(q, chosen, isCorrect, false);
+  updateNavButtons();
+
+  const fb = document.getElementById('feedback');
+  fb.className = `feedback ${isCorrect?'correct':'wrong'}`;
+  document.getElementById('fb-icon').textContent  = isCorrect ? '✅' : '❌';
+  document.getElementById('fb-title').textContent = isCorrect ? '¡Correcto!' : 'Incorrecto';
+  document.getElementById('fb-sub').textContent   = isCorrect
+    ? 'Muy bien, sigue así'
+    : `La respuesta correcta era la opción ${correct}`;
+
+  const ratBtn = document.getElementById('rat-toggle');
+  const ratBox = document.getElementById('rat-box');
+  if (q.rationale && q.rationale.length > 20) {
+    ratBtn.style.display = 'inline-flex';
+    ratBox.textContent = q.rationale;
+    ratBox.classList.remove('open');
+    ratBtn.textContent = '📖 Ver comentario';
+  } else {
+    ratBtn.style.display = 'none';
+    ratBox.classList.remove('open');
+  }
+
+  const sigBtn = document.getElementById('siguiente-btn');
+  sigBtn.style.display = isCorrect ? 'none' : 'block';
+
+  requestAnimationFrame(() => fb.classList.add('show'));
+
+  if (isCorrect) {
+    clearTimeout(fbTimer);
+    fbTimer = setTimeout(() => { idx++; viewIdx=null; renderQuestion(); }, 1500);
+  }
+  // Wrong: wait for Siguiente tap
+}
+
+function advanceFromWrong() {
+  clearTimeout(fbTimer);
+  document.getElementById('rat-box').classList.remove('open');
+  document.getElementById('rat-toggle').textContent = '📖 Ver comentario';
+  idx++; viewIdx = null;
+  renderQuestion();
+}
+
+function toggleRationale() {
+  const box    = document.getElementById('rat-box');
+  const toggle = document.getElementById('rat-toggle');
+  const isOpen = box.classList.toggle('open');
+  toggle.textContent = isOpen ? '✕ Cerrar comentario' : '📖 Ver comentario';
+  if (!isOpen) {
+    const q = questions[idx];
+    if (q && answeredMap[q.id]?.isCorrect) {
+      clearTimeout(fbTimer);
+      fbTimer = setTimeout(() => { idx++; viewIdx=null; renderQuestion(); }, 800);
+    }
+  } else {
+    clearTimeout(fbTimer);
+  }
+}
+
+function hideFeedback() {
+  clearTimeout(fbTimer);
+  const fb = document.getElementById('feedback');
+  fb.classList.remove('show');
+  fb.className = 'feedback';
+  document.getElementById('rat-toggle').style.display = 'none';
+  document.getElementById('rat-box').classList.remove('open');
+  document.getElementById('siguiente-btn').style.display = 'none';
+}
+
+// ── Save ──────────────────────────────────────────────────────
+async function saveAnswer(q, selected, isCorrect, skipped) {
+  if (!attemptId && !customTestId) return;
+  try {
+    const record = {
+      question_id: q.id,
+      question_number: q.number,
+      selected_option: selected,
+      is_correct: isCorrect,
+      skipped: skipped,
+      answered_at: new Date().toISOString(),
+    };
+    if (customTestId) {
+      record.custom_test_id = customTestId;
+      await sb.from('question_attempts').insert(record);
+      const answered = score.c + score.w;
+      await sb.from('custom_tests').update({
+        total_answered: answered,
+        total_correct: score.c,
+        total_incorrect: score.w,
+        skipped: score.s,
+        last_question_index: idx,
+      }).eq('id', customTestId);
+    } else {
+      record.attempt_id = attemptId;
+      await sb.from('question_attempts').upsert(record, {onConflict:'attempt_id,question_id'});
+      const answered = score.c + score.w;
+      await sb.from('attempts').update({
+        total_answered: answered,
+        total_correct: score.c,
+        total_incorrect: score.w,
+        skipped: score.s,
+        last_question_index: idx,
+      }).eq('id', attemptId);
+    }
+  } catch(e) { console.warn('Save failed:', e); }
+}
+
+// ── Exit ──────────────────────────────────────────────────────
+function requestExit() {
+  const answered = score.c + score.w;
+  document.getElementById('exit-answered').textContent = answered;
+  document.getElementById('exit-modal').classList.add('open');
+}
+async function exitResume() {
+  document.getElementById('exit-modal').classList.remove('open');
+  customTestId = null;
+  showScreen('home'); loadHome();
+}
+async function exitPartial() {
+  document.getElementById('exit-modal').classList.remove('open');
+  const answered = score.c + score.w;
+  const pct = answered > 0 ? (score.c / answered) * 100 : 0;
+  try {
+    if (customTestId) {
+      await sb.from('custom_tests').update({
+        status:'partial', score_pct:pct,
+        total_answered:answered, total_correct:score.c,
+        total_incorrect:score.w, skipped:score.s,
+      }).eq('id', customTestId);
+      customTestId = null;
+    } else {
+      await sb.from('attempts').update({
+        status:'partial', score_pct:pct,
+        total_answered:answered, total_correct:score.c,
+        total_incorrect:score.w, skipped:score.s,
+      }).eq('id', attemptId);
+    }
+  } catch(e) { console.warn(e); }
+  showScreen('home'); loadHome();
+}
+async function exitDiscard() {
+  document.getElementById('discard-modal').classList.remove('open');
+  try {
+    if (customTestId) {
+      await sb.from('custom_tests').delete().eq('id', customTestId);
+      customTestId = null;
+    } else {
+      await sb.from('attempts').delete().eq('id', attemptId);
+      attemptId = null;
+    }
+  } catch(e) { console.warn(e); }
+  showScreen('home'); loadHome();
+}
+
+// ── Finish ────────────────────────────────────────────────────
+async function finishExam() {
+  const answered = score.c + score.w;
+  const pct = answered > 0 ? (score.c / answered) * 100 : 0;
+  try {
+    if (customTestId) {
+      await sb.from('custom_tests').update({
+        status:'complete',
+        total_answered:answered, total_correct:score.c,
+        total_incorrect:score.w, skipped:score.s, score_pct:pct,
+      }).eq('id', customTestId);
+    } else {
+      await sb.from('attempts').update({
+        status:'complete', completed_at:new Date().toISOString(),
+        total_answered:answered, total_correct:score.c,
+        total_incorrect:score.w, skipped:score.s, score_pct:pct,
+      }).eq('id', attemptId);
+    }
+  } catch(e) { console.warn(e); }
+  showScreen('results');
+  document.getElementById('res-c').textContent = score.c;
+  document.getElementById('res-w').textContent = score.w;
+  document.getElementById('res-s').textContent = score.s;
+  document.getElementById('ring-pct').textContent = `${Math.round(pct)}%`;
+  document.getElementById('res-emoji').textContent  = pct>=75?'🏆':pct>=50?'📚':'💪';
+  document.getElementById('res-title').textContent  = pct>=75?'¡Excelente resultado!':pct>=50?'Buen intento':'¡Sigue practicando!';
+  document.getElementById('res-sub').textContent    = `${exam?.name||'Examen'} completado`;
+  const ring = document.getElementById('ring-fill');
+  ring.style.stroke = pct>=70?'var(--green)':pct>=50?'var(--yellow)':'var(--red)';
+  setTimeout(() => { ring.style.strokeDashoffset = 377-(pct/100)*377; }, 100);
+}
+function goHome() { showScreen('home'); loadHome(); }
+
+// ── Images ────────────────────────────────────────────────────
+function formatQText(text, imageRefs, imageUrls) {
+  if (!text) return '';
+  let html = esc(text);
+  // MIR 2025 style: (IMAGEN N) or (IMÁGENES Na y Nb)
+  html = html.replace(/\(IMÁGENES\s+([\w]+(?:\s+y\s+[\w]+)*)\)/gi, (_,refs) =>
+    buildImgRef(refs.split(/\s+y\s+/i).map(r=>r.trim().toLowerCase()), imageUrls));
+  html = html.replace(/\(IMAGEN\s+([\w]+)\)/gi, (_,ref) =>
+    buildImgRef([ref.trim().toLowerCase()], imageUrls));
+  // MIR 2024 style: "Pregunta asociada a la imagen N" — use image_refs from DB
+  // If refs are populated but no parenthesised match was found, inject link from image_refs
+  if (imageRefs && imageRefs.length > 0 && !html.match(/🔬/)) {
+    html = html.replace(
+      /Pregunta asociada a la imagen \d+\.?/gi,
+      _ => buildImgRef(imageRefs.map(r=>String(r).toLowerCase()), imageUrls)
+    );
+  }
+  return html;
+}
+function buildImgRef(refs, imageUrls) {
+  const labels = refs.map(r=>`Imagen ${r.toUpperCase()}`).join(' y ');
+  const refsJ  = JSON.stringify(refs).replace(/"/g,'&quot;');
+  const urlsJ  = JSON.stringify(imageUrls||{}).replace(/"/g,'&quot;');
+  return `<a class="img-ref" href="#" onclick="event.preventDefault();openImg(${refsJ},${urlsJ})">🔬 ${labels}</a>`;
+}
+let ovRefs=[], ovUrls={};
+function openImg(refs, urls) {
+  ovRefs=refs; ovUrls=urls;
+  const tabs=document.getElementById('ov-tabs');
+  tabs.innerHTML = refs.length>1
+    ? refs.map(r=>`<button class="ov-tab" onclick="switchImg('${r}')">Imagen ${r.toUpperCase()}</button>`).join('')
+    : '';
+  switchImg(refs[0]);
+  document.getElementById('img-overlay').classList.add('open');
+}
+function switchImg(ref) {
+  const url=ovUrls[ref];
+  document.getElementById('ov-img').src = url||'';
+  document.getElementById('ov-label').textContent = `Imagen ${ref.toUpperCase()}`;
+  document.querySelectorAll('.ov-tab').forEach(t=>
+    t.classList.toggle('active', t.textContent===`Imagen ${ref.toUpperCase()}`));
+  if (!url) showToast('Imagen no disponible');
+}
+function closeImg() { document.getElementById('img-overlay').classList.remove('open'); }
+document.getElementById('img-overlay').addEventListener('click', function(e) {
+  if (e.target===this||e.target===document.getElementById('ov-wrap')) closeImg();
+});
+
+// ── Utilities ─────────────────────────────────────────────────
+function showScreen(name) {
+  document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
+  document.getElementById(`screen-${name}`).classList.add('active');
+  if (name!=='auth') hideLoading();
+  document.getElementById('test-bar').classList.toggle('visible', name==='home');
+}
+function showLoading(txt='Cargando...') {
+  document.getElementById('loading-txt').textContent=txt;
+  document.getElementById('loading').style.display='flex';
+}
+function hideLoading() { document.getElementById('loading').style.display='none'; }
+let toastT;
+function showToast(msg) {
+  const t=document.getElementById('toast');
+  t.textContent=msg; t.classList.add('show');
+  clearTimeout(toastT);
+  toastT=setTimeout(()=>t.classList.remove('show'),3000);
+}
+function esc(s) {
+  if (!s) return '';
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ── Custom Test ────────────────────────────────────────────────
+let customTestCount = 100;
+let customTestScope = 'all';     // 'all' | 'select'
+let selectedTemas = new Set();
+let allTemas = [];               // [{tema, subject}] from DB
+
+async function openTestModal(count) {
+  customTestCount = count;
+  customTestScope = 'all';
+  selectedTemas.clear();
+  document.getElementById('tema-modal-title').textContent = `Test de ${count} preguntas`;
+  setTemaScope('all');
+
+  // Load temas if not already loaded
+  if (!allTemas.length) {
+    try {
+      const { data } = await sb.from('questions')
+        .select('tema, tema_subject')
+        .not('tema', 'is', null)
+        .neq('tema', '')
+        .order('tema_subject', {ascending:true});
+      const seen = new Set();
+      allTemas = [];
+      (data||[]).forEach(r => {
+        const key = r.tema;
+        if (!seen.has(key)) { seen.add(key); allTemas.push({tema:r.tema, subject:r.tema_subject}); }
+      });
+    } catch(e) { console.error(e); }
+  }
+
+  renderTemaList();
+  document.getElementById('tema-modal-backdrop').classList.add('open');
+}
+
+function renderTemaList() {
+  // Group temas by subject
+  const bySubject = {};
+  allTemas.forEach(t => {
+    const s = t.subject || 'Sin asignatura';
+    if (!bySubject[s]) bySubject[s] = [];
+    bySubject[s].push(t);
+  });
+
+  const el = document.getElementById('tema-list');
+  let html = '';
+  Object.entries(bySubject).sort(([a],[b])=>a.localeCompare(b)).forEach(([subj, temas]) => {
+    html += `<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);padding:8px 2px 4px">${esc(subj)}</div>`;
+    temas.forEach(t => {
+      const sel = selectedTemas.has(t.tema);
+      html += `<div class="tema-item${sel?' selected':''}" onclick="toggleTema('${esc(t.tema).replace(/'/g,"\\'")}')">
+        <div class="tema-check">${sel?'✓':''}</div>
+        <div class="tema-item-name">${esc(t.tema)}</div>
+      </div>`;
+    });
+  });
+  el.innerHTML = html;
+  updateTemaStartBtn();
+}
+
+function toggleTema(tema) {
+  if (selectedTemas.has(tema)) selectedTemas.delete(tema);
+  else selectedTemas.add(tema);
+  renderTemaList();
+}
+
+function setTemaScope(scope) {
+  customTestScope = scope;
+  document.getElementById('scope-all').classList.toggle('active', scope==='all');
+  document.getElementById('scope-select').classList.toggle('active', scope==='select');
+  document.getElementById('tema-list').style.display = scope==='select' ? 'flex' : 'none';
+  updateTemaStartBtn();
+}
+
+function updateTemaStartBtn() {
+  const btn = document.getElementById('tema-modal-start');
+  const ok = customTestScope === 'all' || selectedTemas.size > 0;
+  btn.disabled = !ok;
+  btn.textContent = ok
+    ? `Empezar test (${customTestCount} preguntas)`
+    : 'Selecciona al menos un tema';
+}
+
+function closeTestModal() {
+  document.getElementById('tema-modal-backdrop').classList.remove('open');
+}
+
+// Count modal
+function openCountModal() {
+  customTestCount = 75;
+  document.getElementById('count-val').textContent = 75;
+  document.getElementById('count-modal-backdrop').classList.add('open');
+}
+function closeCountModal() {
+  document.getElementById('count-modal-backdrop').classList.remove('open');
+}
+function adjustCount(delta) {
+  const el = document.getElementById('count-val');
+  customTestCount = Math.min(200, Math.max(10, (parseInt(el.textContent)||75) + delta));
+  el.textContent = customTestCount;
+}
+function confirmCount() {
+  closeCountModal();
+  openTestModal(customTestCount);
+}
+
+// ── Question selection logic ───────────────────────────────────
+async function launchCustomTest() {
+  document.getElementById('tema-modal-backdrop').classList.remove('open');
+  showLoading('Preparando test...');
+  try {
+    const N = customTestCount;
+
+    // 1. Fetch candidate questions filtered by tema scope
+    let query = sb.from('questions').select('id, number, exam_id, tema, tema_subject, is_annulled');
+    if (customTestScope === 'select' && selectedTemas.size > 0) {
+      query = query.in('tema', [...selectedTemas]);
+    }
+    const { data: allQs } = await query.eq('is_annulled', false);
+    if (!allQs || !allQs.length) { showToast('No hay preguntas para estos temas'); hideLoading(); return; }
+
+    // 2. Fetch this user's most recent attempt result per question
+    const { data: myAttempts } = await sb.from('attempts')
+      .select('id')
+      .eq('user_id', user.id)
+      .in('status', ['complete', 'partial', 'in_progress']);
+    const myAttemptIds = (myAttempts||[]).map(a => a.id);
+
+    let wrongQIds = new Set();
+    let lastAnsweredAt = {}; // qId -> ISO string
+
+    if (myAttemptIds.length) {
+      const candidateIds = allQs.map(q => q.id);
+      const { data: qAttempts } = await sb.from('question_attempts')
+        .select('question_id, is_correct, answered_at')
+        .in('attempt_id', myAttemptIds)
+        .in('question_id', candidateIds.length ? candidateIds : ['00000000-0000-0000-0000-000000000000'])
+        .order('answered_at', {ascending: false});
+
+      // Per question, keep only the most recent attempt result
+      const seenQ = new Set();
+      (qAttempts||[]).forEach(qa => {
+        if (!seenQ.has(qa.question_id)) {
+          seenQ.add(qa.question_id);
+          if (!qa.is_correct) wrongQIds.add(qa.question_id);
+          if (qa.answered_at) lastAnsweredAt[qa.question_id] = qa.answered_at;
+        }
+      });
+    }
+
+    // 3. Group questions by tema
+    const byTema = {};
+    allQs.forEach(q => {
+      const t = q.tema || 'Sin tema';
+      if (!byTema[t]) byTema[t] = [];
+      byTema[t].push(q);
+    });
+    const temas = Object.keys(byTema);
+    const nTemas = temas.length;
+
+    // 4. Allocate slots per tema — divide N evenly, spread remainder round-robin
+    const baseSlots = Math.floor(N / nTemas);
+    let remainder   = N % nTemas;
+    const slots = {};
+    temas.forEach(t => { slots[t] = baseSlots; });
+    // Give remainder slots to temas with the most questions available (most room)
+    temas.slice().sort((a,b) => byTema[b].length - byTema[a].length)
+         .slice(0, remainder)
+         .forEach(t => { slots[t]++; });
+
+    // 5. Within each tema, fill slots using priority: wrong → never seen → oldest first
+    const selected = [];
+    const overflow = []; // questions from temas that couldn't fill their slot
+
+    temas.forEach(t => {
+      const qs = byTema[t];
+      const wrong      = shuffle(qs.filter(q => wrongQIds.has(q.id)));
+      const neverSeen  = shuffle(qs.filter(q => !wrongQIds.has(q.id) && !lastAnsweredAt[q.id]));
+      const oldest     = qs.filter(q => !wrongQIds.has(q.id) && lastAnsweredAt[q.id])
+                           .sort((a,b) => lastAnsweredAt[a.id].localeCompare(lastAnsweredAt[b.id]));
+      const ordered    = [...wrong, ...neverSeen, ...oldest];
+      const alloc      = slots[t];
+      selected.push(...ordered.slice(0, alloc));
+      // If we couldn't fill the slot, note how many are missing (not needed — overflow fills from others)
+      // If we have extras beyond alloc, add to overflow pool for redistribution
+      overflow.push(...ordered.slice(alloc));
+    });
+
+    // 6. If selected < N (some temas didn't have enough questions), fill from overflow
+    if (selected.length < N && overflow.length) {
+      // Overflow is already prioritised within each tema; shuffle so no tema dominates the fill
+      shuffle(overflow);
+      selected.push(...overflow.slice(0, N - selected.length));
+    }
+
+    // Final cap at N
+    const finalSelected = selected.slice(0, N);
+
+    if (!finalSelected.length) { showToast('No hay preguntas disponibles'); hideLoading(); return; }
+
+    // 7. Fetch full question data
+    const selectedIds = finalSelected.map(q => q.id);
+    const { data: fullQs } = await sb.from('questions').select('*').in('id', selectedIds);
+
+    // Preserve prioritised order
+    const idxMap = {};
+    selectedIds.forEach((id,i) => idxMap[id] = i);
+    const orderedQs = (fullQs||[]).sort((a,b) => idxMap[a.id] - idxMap[b.id]);
+
+    // 8. Create custom_test record
+    const { error: ctErr } = await sb.from('custom_tests').insert({
+      user_id: user.id,
+      type: 'custom_set',
+      question_ids: selectedIds,
+      status: 'in_progress',
+      total_answered: 0, total_correct: 0, total_incorrect: 0, skipped: 0,
+      last_question_index: 0,
+      score_pct: 0,
+    });
+    if (ctErr) throw new Error('custom_tests insert: ' + ctErr.message);
+
+    // Fetch the newly created record separately (avoids RLS timing issues with .select().single())
+    const { data: ct, error: ctFetchErr } = await sb.from('custom_tests')
+      .select('id')
+      .eq('user_id', user.id)
+      .eq('status', 'in_progress')
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .single();
+    if (ctFetchErr) throw new Error('custom_tests fetch: ' + ctFetchErr.message);
+    if (!ct) throw new Error('custom_tests: could not retrieve new record');
+    customTestId = ct.id;
+
+    // 9. Launch exam screen
+    const temaLabel = customTestScope === 'all'
+      ? 'todos los temas'
+      : `${selectedTemas.size} tema${selectedTemas.size>1?'s':''}`;
+    exam = {id: null, name: `Test ${orderedQs.length}Q — ${temaLabel}`, totalQ: orderedQs.length, isCustom: true};
+    questions = orderedQs;
+    score = {c:0, w:0, s:0};
+    answeredMap = {};
+    viewIdx = null;
+    idx = 0;
+    attemptId = null;
+
+    showScreen('exam');
+    renderQuestion();
+  } catch(e) {
+    console.error('Custom test error:', e);
+    showToast('Error: ' + (e?.message || 'desconocido'));
+  } finally { hideLoading(); }
+}
+
+
+function shuffle(arr) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+</script>
+</body>
+</html>
