@@ -889,6 +889,8 @@ function renderQuestion() {
         <span class="opt-n">${n}</span><span>${esc(txt)}</span>
       </button>`;
     }).join('');
+    // Show feedback panel for review
+    showReviewFeedback(q, prev);
     return;
   }
 
@@ -1020,6 +1022,54 @@ function toggleRationale() {
   if (isOpen) {
     clearTimeout(fbTimer);
   }
+}
+
+function showReviewFeedback(q, prev) {
+  const isUnattempted = prev.selected === 99;
+  const isCorrect     = prev.isCorrect;
+  const correct       = q.correct_option;
+  const fb = document.getElementById('feedback');
+
+  if (isUnattempted) {
+    fb.className = 'feedback wrong';
+    document.getElementById('fb-icon').textContent  = '❌';
+    document.getElementById('fb-title').textContent = 'No intentado';
+    document.getElementById('fb-sub').textContent   = `La respuesta correcta era la opción ${correct}`;
+  } else if (isCorrect) {
+    fb.className = 'feedback correct';
+    document.getElementById('fb-icon').textContent  = '✅';
+    document.getElementById('fb-title').textContent = '¡Correcto!';
+    document.getElementById('fb-sub').textContent   = 'Muy bien, sigue así';
+  } else {
+    fb.className = 'feedback wrong';
+    document.getElementById('fb-icon').textContent  = '❌';
+    document.getElementById('fb-title').textContent = 'Incorrecto';
+    document.getElementById('fb-sub').textContent   = `La respuesta correcta era la opción ${correct}`;
+  }
+
+  const ratBtn = document.getElementById('rat-toggle');
+  const ratBox = document.getElementById('rat-box');
+  const aiBtn  = document.getElementById('ai-btn');
+  const sigBtn = document.getElementById('siguiente-btn');
+
+  // Rationale
+  if (q.rationale && q.rationale.length > 20) {
+    ratBtn.style.display = 'inline-flex';
+    ratBox.textContent = q.rationale;
+    ratBox.classList.remove('open');
+    ratBtn.textContent = '📖 Ver comentario';
+  } else {
+    ratBtn.style.display = 'none';
+    ratBox.classList.remove('open');
+  }
+
+  // AI button
+  if (aiBtn) aiBtn.style.display = 'block';
+
+  // Hide Siguiente in review — navigation is via prev/next arrows
+  if (sigBtn) sigBtn.style.display = 'none';
+
+  requestAnimationFrame(() => fb.classList.add('show'));
 }
 
 function hideFeedback() {
